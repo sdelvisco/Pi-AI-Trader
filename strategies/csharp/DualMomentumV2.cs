@@ -30,6 +30,7 @@ using System.Linq;
 using QuantConnect;
 using QuantConnect.Algorithm;
 using QuantConnect.Data;
+using QuantConnect.Data.Market;
 using QuantConnect.Orders;
 
 namespace PiAiTrader.Strategies
