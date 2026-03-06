@@ -1,0 +1,106 @@
+<!--
+  DualMomentumV2.csproj
+  =====================
+  Builds DualMomentumV2.cs as a class library DLL targeting net10.0.
+
+  LEAN DLL references are resolved from the local LEAN build output at:
+    /opt/lean-engine/Launcher/bin/Release/
+
+  To build:
+    dotnet build strategies/csharp/DualMomentumV2.csproj -c Release
+
+  Output:
+    strategies/csharp/bin/Release/DualMomentumV2.dll
+
+  The produced DLL can be placed in the LEAN algorithm folder and referenced
+  in lean.json as the algorithm-type-name entry point.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ======================================================================
+       Project identity & output type
+       ====================================================================== -->
+  <PropertyGroup>
+    <!-- Target the same framework used by the local LEAN build. -->
+    <TargetFramework>net10.0</TargetFramework>
+
+    <!-- Build a DLL (class library), not an executable. -->
+    <OutputType>Library</OutputType>
+
+    <!-- Assembly / namespace identity. -->
+    <AssemblyName>DualMomentumV2</AssemblyName>
+    <RootNamespace>PiAiTrader.Strategies</RootNamespace>
+
+    <!-- Emit to bin/Release/ so the DLL is easy to locate. -->
+    <OutputPath>bin/Release/</OutputPath>
+
+    <!-- Always emit a deterministic build for reproducibility. -->
+    <Deterministic>true</Deterministic>
+
+    <!-- Suppress warnings about nullable reference types; LEAN's own assemblies
+         are not fully annotated, so the compiler emits many false-positive warnings. -->
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+
+    <!-- Suppress "missing XML doc" warnings — docs are inline comments only. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <!-- ======================================================================
+       Local LEAN DLL references
+       Reference path: /opt/lean-engine/Launcher/bin/Release/
+       These are file-based HintPath references (no NuGet packages).
+       ====================================================================== -->
+  <ItemGroup>
+
+    <!--
+      QuantConnect.Common.dll
+      Core types: Symbol, Resolution, OrderType, BrokerageName, etc.
+    -->
+    <Reference Include="QuantConnect.Common">
+      <HintPath>/opt/lean-engine/Launcher/bin/Release/QuantConnect.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!--
+      QuantConnect.Algorithm.dll
+      QCAlgorithm base class: Initialize(), OnData(), SetHoldings(), History(), etc.
+    -->
+    <Reference Include="QuantConnect.Algorithm">
+      <HintPath>/opt/lean-engine/Launcher/bin/Release/QuantConnect.Algorithm.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!--
+      QuantConnect.Algorithm.Framework.dll
+      Alpha / portfolio construction framework types (Universe, InsightCollection, etc.)
+      Included even if not directly used — required by QCAlgorithm at runtime.
+    -->
+    <Reference Include="QuantConnect.Algorithm.Framework">
+      <HintPath>/opt/lean-engine/Launcher/bin/Release/QuantConnect.Algorithm.Framework.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!--
+      QuantConnect.Indicators.dll
+      Built-in technical indicators (SMA, EMA, ROC, etc.).
+      Included for potential future use and because QCAlgorithm depends on it.
+    -->
+    <Reference Include="QuantConnect.Indicators">
+      <HintPath>/opt/lean-engine/Launcher/bin/Release/QuantConnect.Indicators.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!--
+      QuantConnect.Logging.dll
+      Log / Debug utilities used internally by LEAN; needed to avoid type-resolution
+      errors when LEAN loads the algorithm DLL at runtime.
+    -->
+    <Reference Include="QuantConnect.Logging">
+      <HintPath>/opt/lean-engine/Launcher/bin/Release/QuantConnect.Logging.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+  </ItemGroup>
+
+</Project>
