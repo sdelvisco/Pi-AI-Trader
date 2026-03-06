@@ -44,6 +44,10 @@
 
     <!-- Suppress "missing XML doc" warnings — docs are inline comments only. -->
     <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <!-- Only compile DualMomentumV2.cs; exclude all other .cs files in the directory
+         (e.g. ExampleAlgorithm.cs) which may reference unavailable LEAN API members. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
 
   <!-- ======================================================================
@@ -51,7 +55,22 @@
        Reference path: /opt/lean-engine/Launcher/bin/Release/
        These are file-based HintPath references (no NuGet packages).
        ====================================================================== -->
+  <!-- Explicitly compile only DualMomentumV2.cs -->
   <ItemGroup>
+    <Compile Include="DualMomentumV2.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+
+    <!--
+      Python.Runtime.dll
+      Required to resolve PyObject and other Python interop types used
+      transitively by LEAN's assemblies (prevents CS0012 errors).
+    -->
+    <Reference Include="Python.Runtime">
+      <HintPath>/opt/lean-engine/Launcher/bin/Release/Python.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
 
     <!--
       QuantConnect.Common.dll
