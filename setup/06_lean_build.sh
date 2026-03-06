@@ -15,11 +15,13 @@
 #   2. Clones QuantConnect/Lean.Brokerages.Alpaca → /opt/lean-alpaca
 #   3. Patches AlpacaBrokerage.cs to comment out ValidateSubscription()
 #      (this call fails for free QuantConnect accounts at runtime)
-#   4. Builds LEAN in Release configuration
-#   5. Builds the Alpaca plugin in Release configuration
-#   6. Copies Alpaca plugin DLLs into LEAN's Release output directory
+#   4. Creates symlink /opt/Lean → /opt/lean-engine to satisfy the Alpaca
+#      plugin's hardcoded relative path reference to ../../Lean/
+#   5. Builds LEAN in Release configuration
+#   6. Builds the Alpaca plugin in Release configuration
+#   7. Copies Alpaca plugin DLLs into LEAN's Release output directory
 #      so LEAN can discover the brokerage plugin at runtime
-#   7. Sets /opt/lean-engine and /opt/lean-alpaca ownership to pi-admin
+#   8. Sets /opt/lean-engine and /opt/lean-alpaca ownership to pi-admin
 #
 # WARNING: Both builds are computationally intensive. On Raspberry Pi 4
 # hardware, each build may take 30–60 minutes. Do not interrupt the script
@@ -256,7 +258,26 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 4: Build LEAN engine in Release configuration
+# Step 4: Create /opt/Lean symlink for Alpaca plugin's hardcoded path
+# -----------------------------------------------------------------------------
+section "Creating /opt/Lean symlink for Alpaca plugin"
+
+# QuantConnect.AlpacaBrokerage.csproj contains a hardcoded relative path:
+#   <Compile Include="..\..\Lean\Common\Properties\SharedAssemblyInfo.cs" />
+# From its location at /opt/lean-alpaca/QuantConnect.AlpacaBrokerage/, that
+# resolves to /opt/Lean/Common/Properties/SharedAssemblyInfo.cs.  LEAN is
+# cloned to /opt/lean-engine, not /opt/Lean, so the build would fail with a
+# "file not found" error without this symlink.
+#
+# Creating /opt/Lean → /opt/lean-engine satisfies the plugin's hardcoded
+# reference without modifying any upstream source files.
+info "[INFO] Creating symlink /opt/Lean → /opt/lean-engine to satisfy the Alpaca plugin's hardcoded relative path reference to ../../Lean/"
+ln -sfn /opt/lean-engine /opt/Lean \
+    || die "Failed to create symlink /opt/Lean → /opt/lean-engine"
+info "Symlink created: /opt/Lean → $(readlink /opt/Lean)"
+
+# -----------------------------------------------------------------------------
+# Step 5: Build LEAN engine in Release configuration
 # -----------------------------------------------------------------------------
 section "Building LEAN engine (Release) — this will take a long time"
 
@@ -281,7 +302,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 5: Build Alpaca brokerage plugin in Release configuration
+# Step 6: Build Alpaca brokerage plugin in Release configuration
 # -----------------------------------------------------------------------------
 section "Building Alpaca brokerage plugin (Release) — this will take a long time"
 
@@ -315,7 +336,7 @@ fi
 info "Alpaca plugin DLLs built: $ALPACA_DLL_COUNT file(s)"
 
 # -----------------------------------------------------------------------------
-# Step 6: Copy Alpaca plugin DLLs into LEAN's Release output directory
+# Step 7: Copy Alpaca plugin DLLs into LEAN's Release output directory
 # -----------------------------------------------------------------------------
 section "Copying Alpaca plugin DLLs into LEAN Release output"
 
@@ -348,7 +369,7 @@ fi
 info "$COPIED DLL(s) copied into LEAN Release directory."
 
 # -----------------------------------------------------------------------------
-# Step 7: Set ownership of build directories
+# Step 8: Set ownership of build directories
 # -----------------------------------------------------------------------------
 section "Setting ownership of build directories"
 
