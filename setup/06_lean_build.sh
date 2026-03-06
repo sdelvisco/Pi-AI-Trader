@@ -86,6 +86,11 @@ ALPACA_REPO_URL="https://github.com/QuantConnect/Lean.Brokerages.Alpaca.git"
 LEAN_SLN="${LEAN_ENGINE_DIR}/QuantConnect.Lean.sln"
 ALPACA_SLN="${LEAN_ALPACA_DIR}/QuantConnect.AlpacaBrokerage.sln"
 
+# Brokerage-only project file — built instead of the full solution to avoid the
+# test project that references ../Lean/Tests/ (which resolves to /opt/Lean/Tests/
+# and does not exist; LEAN is at /opt/lean-engine/).
+ALPACA_CSPROJ="${LEAN_ALPACA_DIR}/QuantConnect.AlpacaBrokerage/QuantConnect.AlpacaBrokerage.csproj"
+
 # Release output directories produced by dotnet build.
 LEAN_RELEASE_DIR="${LEAN_ENGINE_DIR}/Launcher/bin/Release"
 ALPACA_RELEASE_DIR="${LEAN_ALPACA_DIR}/QuantConnect.AlpacaBrokerage/bin/Release"
@@ -197,6 +202,12 @@ fi
 
 info "Alpaca solution file confirmed: $ALPACA_SLN"
 
+# Verify the brokerage project file is present (used for the actual build).
+[[ -f "$ALPACA_CSPROJ" ]] \
+    || die "Expected project file not found: $ALPACA_CSPROJ — clone may be incomplete"
+
+info "Alpaca project file confirmed: $ALPACA_CSPROJ"
+
 # -----------------------------------------------------------------------------
 # Step 3: Patch AlpacaBrokerage.cs — comment out ValidateSubscription()
 # -----------------------------------------------------------------------------
@@ -275,12 +286,17 @@ fi
 section "Building Alpaca brokerage plugin (Release) — this will take a long time"
 
 info "Build start time: $(date '+%Y-%m-%d %H:%M:%S')"
-info "Building: $ALPACA_SLN"
+info "Building: $ALPACA_CSPROJ"
 info "Configuration: Release"
 info "Output will be at: $ALPACA_RELEASE_DIR"
 echo ""
 
-"$DOTNET_BIN" build "$ALPACA_SLN" -c Release \
+# Build the brokerage project directly instead of the full solution.
+# The solution includes a test project that references ../Lean/Tests/ which
+# resolves to /opt/Lean/Tests/ — a path that does not exist because LEAN is
+# cloned to /opt/lean-engine/.  Building the .csproj skips that test project
+# entirely and produces exactly the plugin DLLs we need.
+"$DOTNET_BIN" build "$ALPACA_CSPROJ" -c Release \
     || die "Alpaca plugin build failed — check the output above for compiler errors"
 
 info "Alpaca plugin build complete at $(date '+%H:%M:%S')."
