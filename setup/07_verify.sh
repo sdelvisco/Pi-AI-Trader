@@ -59,6 +59,14 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${PROJECT_ROOT}/venv"
 DOTNET_INSTALL_DIR="/usr/local/share/dotnet"
 
+# Source the dotnet profile so PATH and DOTNET_CLI_TELEMETRY_OPTOUT are set
+# even when the script is run via sudo (which does not load /etc/profile.d/).
+# shellcheck source=/etc/profile.d/dotnet.sh
+if [[ -f /etc/profile.d/dotnet.sh ]]; then
+    # shellcheck disable=SC1091
+    source /etc/profile.d/dotnet.sh
+fi
+
 # -----------------------------------------------------------------------------
 # Section 1: OS and network
 # -----------------------------------------------------------------------------
@@ -191,10 +199,10 @@ DOTNET_BIN="${DOTNET_INSTALL_DIR}/dotnet"
 
 if [[ -x "$DOTNET_BIN" ]]; then
     DOTNET_VERSION="$("$DOTNET_BIN" --version 2>/dev/null || echo unknown)"
-    if [[ "$DOTNET_VERSION" == 8* ]]; then
-        pass ".NET SDK 8.x installed: $DOTNET_VERSION"
+    if [[ "$DOTNET_VERSION" == 10* ]]; then
+        pass ".NET SDK 10.x installed: $DOTNET_VERSION"
     else
-        warn ".NET installed but version is '$DOTNET_VERSION' — expected 8.x"
+        warn ".NET installed but version is '$DOTNET_VERSION' — expected 10.x"
     fi
 else
     fail ".NET SDK not found at $DOTNET_BIN — run 04_dotnet.sh"
