@@ -33,6 +33,8 @@ using QuantConnect.Data;
 using QuantConnect.Data.Market;
 using QuantConnect.Orders;
 
+#nullable enable
+
 namespace PiAiTrader.Strategies
 {
     /// <summary>
