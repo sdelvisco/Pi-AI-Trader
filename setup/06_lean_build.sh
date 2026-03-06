@@ -88,11 +88,11 @@ ALPACA_SLN="${LEAN_ALPACA_DIR}/QuantConnect.AlpacaBrokerage.sln"
 
 # Release output directories produced by dotnet build.
 LEAN_RELEASE_DIR="${LEAN_ENGINE_DIR}/Launcher/bin/Release"
-ALPACA_RELEASE_DIR="${LEAN_ALPACA_DIR}/AlpacaBrokerage/bin/Release"
+ALPACA_RELEASE_DIR="${LEAN_ALPACA_DIR}/QuantConnect.AlpacaBrokerage/bin/Release"
 
 # The AlpacaBrokerage.cs file that contains the ValidateSubscription() call
 # which must be patched before building.
-ALPACA_BROKERAGE_CS="${LEAN_ALPACA_DIR}/AlpacaBrokerage/AlpacaBrokerage.cs"
+ALPACA_BROKERAGE_CS="${LEAN_ALPACA_DIR}/QuantConnect.AlpacaBrokerage/AlpacaBrokerage.cs"
 
 # dotnet binary — use the one installed by 04_dotnet.sh, not a system package.
 DOTNET_BIN="/usr/local/bin/dotnet"
