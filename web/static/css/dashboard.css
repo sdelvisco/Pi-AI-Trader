@@ -1,0 +1,77 @@
+/*
+ * Pi-AI-Trader Dashboard Styles
+ * Extends Bootstrap 5 dark theme with trading-specific UI conventions.
+ */
+
+/* -------------------------------------------------------------------------
+   Typography
+   ------------------------------------------------------------------------- */
+body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+}
+
+.font-monospace {
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', 'Courier New', monospace;
+}
+
+/* -------------------------------------------------------------------------
+   Cards
+   ------------------------------------------------------------------------- */
+.card {
+    border-radius: 6px;
+}
+
+.card-header {
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+
+/* -------------------------------------------------------------------------
+   Tables
+   ------------------------------------------------------------------------- */
+.table-dark th {
+    color: #6c757d;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    border-bottom-color: #333;
+}
+
+.table-dark td {
+    border-bottom-color: #1a1a1a;
+    vertical-align: middle;
+}
+
+/* -------------------------------------------------------------------------
+   Status badge colours
+   ------------------------------------------------------------------------- */
+.status-active  { color: #28a745; }
+.status-stopped { color: #dc3545; }
+.status-paused  { color: #ffc107; }
+
+/* -------------------------------------------------------------------------
+   Log output
+   ------------------------------------------------------------------------- */
+#log-output {
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: #00ff88;
+    background: #000;
+}
+
+/* -------------------------------------------------------------------------
+   Navbar
+   ------------------------------------------------------------------------- */
+.navbar-brand {
+    letter-spacing: 0.05em;
+}
+
+/* -------------------------------------------------------------------------
+   Footer
+   ------------------------------------------------------------------------- */
+footer {
+    font-size: 0.75rem;
+}

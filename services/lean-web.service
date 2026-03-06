@@ -1,0 +1,114 @@
+# =============================================================================
+# lean-web.service — Flask Web Interface systemd Unit
+# =============================================================================
+# Manages the Gunicorn-served Flask web interface for the Pi-AI-Trader
+# dashboard, providing:
+#   - Live trading status and position overview
+#   - Strategy performance metrics and charts
+#   - Manual trade controls (pause, resume, emergency stop)
+#   - Log viewer and system health indicators
+#
+# The web interface binds ONLY to the local network interface (not 0.0.0.0)
+# to ensure it is not accidentally exposed to the internet.
+# Access it from Windows via: http://tradingpi.local:5000
+#
+# Installation:
+#   sudo cp services/lean-web.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable lean-web   # start automatically on boot
+#   sudo systemctl start lean-web    # start now
+#
+# Management:
+#   sudo systemctl status lean-web
+#   sudo journalctl -u lean-web -f
+# =============================================================================
+
+[Unit]
+Description=Pi-AI-Trader Flask Web Interface
+Documentation=https://github.com/sdelvisco/Pi-AI-Trader
+
+# Start after network is available (needed to bind to the network interface).
+After=network-online.target
+Wants=network-online.target
+
+# The web interface can start independently of the trading engine — it
+# gracefully handles the case where LEAN is not yet running.
+
+[Service]
+# -------------------------------------------------------------------------
+# Identity
+# -------------------------------------------------------------------------
+User=pi
+Group=pi
+
+WorkingDirectory=/home/pi/Pi-AI-Trader/web
+
+# -------------------------------------------------------------------------
+# Credentials — notification settings for email/SMS alerts triggered via UI.
+# -------------------------------------------------------------------------
+EnvironmentFile=-/etc/tradingpi/alpaca.env
+EnvironmentFile=-/etc/tradingpi/notifications.env
+
+# Flask production settings.
+Environment=FLASK_ENV=production
+Environment=FLASK_DEBUG=0
+
+# Secret key for Flask session signing. Generate a strong random value with:
+#   python3 -c "import secrets; print(secrets.token_hex(32))"
+# Then set it in /etc/tradingpi/web.env and reference here:
+EnvironmentFile=-/etc/tradingpi/web.env
+
+# -------------------------------------------------------------------------
+# Process
+# -------------------------------------------------------------------------
+Type=simple
+
+# Gunicorn serves the Flask app with:
+#   --workers 2     : 2 worker processes (adequate for a local-only interface)
+#   --bind          : bind only to the Ethernet interface on port 5000
+#                     using eth0's IP (resolved at start via shell expansion)
+#   --timeout 120   : worker timeout in seconds
+#   --access-logfile - : send access logs to stdout (captured by journal)
+#   --error-logfile -  : send error logs to stderr
+#   web.app:app     : the Flask application object in web/app.py
+ExecStart=/home/pi/Pi-AI-Trader/venv/bin/gunicorn \
+    --workers 2 \
+    --bind 0.0.0.0:5000 \
+    --timeout 120 \
+    --access-logfile - \
+    --error-logfile - \
+    --capture-output \
+    web.app:app
+
+# -------------------------------------------------------------------------
+# Failure handling
+# -------------------------------------------------------------------------
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+# -------------------------------------------------------------------------
+# Resource limits
+# -------------------------------------------------------------------------
+MemoryMax=256M
+CPUQuota=50%
+
+# -------------------------------------------------------------------------
+# Security hardening
+# -------------------------------------------------------------------------
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/pi/Pi-AI-Trader/web
+ReadWritePaths=/home/pi/Pi-AI-Trader/lean/Results
+ReadWritePaths=/tmp
+
+# -------------------------------------------------------------------------
+# Logging
+# -------------------------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lean-web
+
+[Install]
+WantedBy=multi-user.target

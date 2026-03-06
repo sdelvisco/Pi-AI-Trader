@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Settings — Pi-AI-Trader{% endblock %}
+{% block content %}
+<h5 class="mb-3"><i class="bi bi-gear"></i> System Settings</h5>
+<div class="card bg-black border-secondary">
+    <div class="card-body">
+        <p class="text-muted">
+            Configuration is managed via environment files on the Pi.
+            Sensitive values (API keys, passwords) are never displayed here.
+        </p>
+        <table class="table table-dark table-sm">
+            <tbody>
+                <tr>
+                    <td class="text-muted">LEAN Workspace</td>
+                    <td>/home/pi/Pi-AI-Trader/lean</td>
+                </tr>
+                <tr>
+                    <td class="text-muted">Virtual Environment</td>
+                    <td>/home/pi/Pi-AI-Trader/venv</td>
+                </tr>
+                <tr>
+                    <td class="text-muted">Credentials File</td>
+                    <td>/etc/tradingpi/alpaca.env</td>
+                </tr>
+                <tr>
+                    <td class="text-muted">Paper Trading</td>
+                    <td id="setting-paper">—</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+fetch("/api/status")
+    .then(r => r.json())
+    .then(data => {
+        document.getElementById("setting-paper").textContent =
+            data.paper_trading === "true" ? "Yes (paper money)" : "No (live money)";
+    });
+</script>
+{% endblock %}

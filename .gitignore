@@ -1,0 +1,111 @@
+# =============================================================================
+# Pi-AI-Trader .gitignore
+# =============================================================================
+# Excludes credentials, generated data, build artifacts, and environment files
+# that must never be committed to version control.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Credentials and secrets — NEVER commit these
+# -----------------------------------------------------------------------------
+config/alpaca_credentials.json
+config/notifications.json
+*.env
+.env
+.env.*
+secrets/
+credentials/
+
+# -----------------------------------------------------------------------------
+# LEAN Engine data directories — these are large and locally managed
+# -----------------------------------------------------------------------------
+lean/data/
+lean/storage/
+lean/Results/
+lean/backtests/
+lean/live/
+lean/report/
+lean/object-store/
+
+# LEAN CLI workspace artifacts
+.lean/
+lean.json.bak
+
+# -----------------------------------------------------------------------------
+# Python virtual environments and bytecode
+# -----------------------------------------------------------------------------
+venv/
+.venv/
+env/
+.env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Distribution / packaging
+.eggs/
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# mypy
+.mypy_cache/
+
+# -----------------------------------------------------------------------------
+# C# / .NET build artifacts
+# -----------------------------------------------------------------------------
+strategies/csharp/bin/
+strategies/csharp/obj/
+strategies/csharp/*.user
+strategies/csharp/*.suo
+*.nupkg
+*.snupkg
+project.lock.json
+
+# Rider / Visual Studio
+.idea/
+.vs/
+*.DotSettings.user
+
+# -----------------------------------------------------------------------------
+# Logs and runtime files
+# -----------------------------------------------------------------------------
+logs/
+*.log
+*.log.*
+*.pid
+
+# Web app session data
+web/instance/
+web/flask_session/
+web/*.db
+web/*.sqlite
+
+# -----------------------------------------------------------------------------
+# OS-generated files
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# -----------------------------------------------------------------------------
+# SSH keys (if accidentally placed here)
+# -----------------------------------------------------------------------------
+*.pem
+*.key
+*.p12
+id_rsa
+id_ed25519
