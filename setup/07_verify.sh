@@ -57,7 +57,6 @@ info() {
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${PROJECT_ROOT}/venv"
-LEAN_WORKSPACE="${PROJECT_ROOT}/lean"
 DOTNET_INSTALL_DIR="/usr/local/share/dotnet"
 
 # -----------------------------------------------------------------------------
@@ -250,45 +249,38 @@ for MODULE in "${!EXPECTED_PACKAGES[@]}"; do
 done
 
 # -----------------------------------------------------------------------------
-# Section 7: LEAN CLI and workspace
+# Section 7: LEAN engine and Alpaca plugin (source build)
 # -----------------------------------------------------------------------------
-section "LEAN CLI and Docker"
+section "LEAN Engine and Alpaca Plugin (source build)"
 
-LEAN_BIN="${VENV_DIR}/bin/lean"
+LEAN_ENGINE_DIR="/opt/lean-engine"
+LEAN_ALPACA_DIR="/opt/lean-alpaca"
+LEAN_RELEASE_DIR="${LEAN_ENGINE_DIR}/Launcher/bin/Release"
+LEAN_LAUNCHER_DLL="${LEAN_RELEASE_DIR}/QuantConnect.Lean.Launcher.dll"
 
-if [[ -x "$LEAN_BIN" ]]; then
-    LEAN_VERSION="$("$LEAN_BIN" --version 2>/dev/null || echo unknown)"
-    pass "LEAN CLI installed: $LEAN_VERSION"
+# Check that the LEAN launcher DLL exists — this confirms the engine was built.
+if [[ -f "$LEAN_LAUNCHER_DLL" ]]; then
+    pass "LEAN Launcher DLL present: $LEAN_LAUNCHER_DLL"
 else
-    fail "LEAN CLI not found at $LEAN_BIN — run 06_lean_cli.sh"
+    fail "LEAN Launcher DLL not found at $LEAN_LAUNCHER_DLL — run 06_lean_build.sh"
 fi
 
-# Docker
-if command -v docker &>/dev/null; then
-    DOCKER_VERSION="$(docker --version 2>/dev/null)"
-    pass "Docker installed: $DOCKER_VERSION"
+# Check that Alpaca plugin DLLs were copied into the LEAN Release directory.
+# We look for any DLL whose name contains 'Alpaca' (case-sensitive).
+ALPACA_DLL_COUNT="$(find "$LEAN_RELEASE_DIR" -maxdepth 1 -name '*Alpaca*.dll' 2>/dev/null | wc -l)"
+if [[ "$ALPACA_DLL_COUNT" -gt 0 ]]; then
+    pass "Alpaca plugin DLLs present in LEAN Release directory ($ALPACA_DLL_COUNT file(s))"
 else
-    fail "Docker not installed — run 06_lean_cli.sh"
+    fail "No Alpaca plugin DLLs found in $LEAN_RELEASE_DIR — run 06_lean_build.sh"
 fi
 
-if systemctl is-active --quiet docker 2>/dev/null; then
-    pass "Docker service is running"
+# Check that dotnet is on the PATH and returns a version string.
+# The symlink at /usr/local/bin/dotnet is created by 04_dotnet.sh.
+if command -v dotnet &>/dev/null; then
+    DOTNET_PATH_VERSION="$(dotnet --version 2>/dev/null || echo unknown)"
+    pass "dotnet on PATH, version: $DOTNET_PATH_VERSION"
 else
-    fail "Docker service is not running — run: sudo systemctl start docker"
-fi
-
-# LEAN workspace
-if [[ -f "${LEAN_WORKSPACE}/lean.json" ]]; then
-    pass "LEAN workspace initialised (lean.json found)"
-else
-    fail "LEAN workspace not initialised — run 06_lean_cli.sh"
-fi
-
-# LEAN Docker image
-if docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -q "quantconnect/lean"; then
-    pass "LEAN Docker image available locally"
-else
-    warn "LEAN Docker image not found locally — will be pulled on first 'lean' command"
+    fail "dotnet not found on PATH — source /etc/profile.d/dotnet.sh or re-run 04_dotnet.sh"
 fi
 
 # -----------------------------------------------------------------------------
@@ -303,7 +295,6 @@ declare -A EXPECTED_DIRS=(
     ["web/"]="Flask web application"
     ["strategies/csharp/"]="C# strategies"
     ["strategies/python/"]="Python strategies"
-    ["lean/"]="LEAN workspace"
 )
 
 for RELPATH in "${!EXPECTED_DIRS[@]}"; do
