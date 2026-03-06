@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Logs — Pi-AI-Trader{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0"><i class="bi bi-terminal"></i> Live Logs</h5>
+    <div class="d-flex gap-2">
+        <button class="btn btn-sm btn-outline-secondary" id="btn-clear-log">Clear</button>
+        <button class="btn btn-sm btn-outline-success" id="btn-auto-scroll">
+            <i class="bi bi-arrow-down-circle"></i> Auto-scroll
+        </button>
+    </div>
+</div>
+<div class="card bg-black border-secondary">
+    <div class="card-body p-0">
+        <pre id="log-output"
+             class="bg-black text-success font-monospace small p-3 mb-0"
+             style="height: 70vh; overflow-y: auto; white-space: pre-wrap; word-break: break-word;">
+Waiting for log output...</pre>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Stream LEAN logs via Socket.IO.
+// The server emits 'log_line' events as new lines appear in the LEAN output.
+const logOutput = document.getElementById("log-output");
+let autoScroll = true;
+
+document.getElementById("btn-auto-scroll").addEventListener("click", function() {
+    autoScroll = !autoScroll;
+    this.classList.toggle("btn-outline-success", autoScroll);
+    this.classList.toggle("btn-success", autoScroll);
+});
+
+document.getElementById("btn-clear-log").addEventListener("click", function() {
+    logOutput.textContent = "";
+});
+
+const socket = io();
+socket.on("log_line", function(data) {
+    const line = document.createTextNode(data.line + "\n");
+    logOutput.appendChild(line);
+
+    // Cap the log buffer at 2000 lines to prevent memory growth.
+    const lines = logOutput.childNodes;
+    if (lines.length > 2000) {
+        logOutput.removeChild(lines[0]);
+    }
+
+    if (autoScroll) {
+        logOutput.scrollTop = logOutput.scrollHeight;
+    }
+});
+
+socket.on("connect", () => {
+    logOutput.textContent = "[Connected to log stream]\n";
+});
+socket.on("disconnect", () => {
+    logOutput.textContent += "[Disconnected from log stream]\n";
+});
+</script>
+{% endblock %}

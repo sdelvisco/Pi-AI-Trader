@@ -1,0 +1,123 @@
+{
+  // ==========================================================================
+  // LEAN Engine Configuration Template
+  // ==========================================================================
+  // Copy this file to your LEAN workspace as lean.json and fill in the
+  // values marked with <PLACEHOLDER>.
+  //
+  // SECURITY: This template file is safe to commit. The completed lean.json
+  // in the lean/ workspace directory is excluded from git by .gitignore.
+  //
+  // API credentials are NOT stored here — they are injected at runtime via
+  // environment variables referenced in the systemd EnvironmentFile.
+  //
+  // LEAN documentation: https://www.lean.io/docs/v2/lean-engine/configuration
+  // ==========================================================================
+
+  // --------------------------------------------------------------------------
+  // Environment and data paths
+  // --------------------------------------------------------------------------
+
+  // Path to the LEAN data directory. LEAN downloads historical market data
+  // here and reads it during backtests.
+  "data-folder": "/lean/data",
+
+  // Path where LEAN writes backtest results, logs, and reports.
+  "results-destination-folder": "/lean/Results",
+
+  // Controls the verbosity of LEAN's logging output.
+  // Options: "Trace", "Debug", "Information", "Warning", "Error"
+  "log-level": "Information",
+
+  // --------------------------------------------------------------------------
+  // Algorithm configuration
+  // --------------------------------------------------------------------------
+
+  // The name of the algorithm class to run. Replace with your class name.
+  "algorithm-type-name": "<YOUR_ALGORITHM_CLASS_NAME>",
+
+  // Language: "CSharp" or "Python"
+  "algorithm-language": "CSharp",
+
+  // Path to the algorithm file or compiled DLL.
+  "algorithm-location": "<PATH_TO_ALGORITHM>",
+
+  // --------------------------------------------------------------------------
+  // Live trading — Alpaca brokerage
+  // --------------------------------------------------------------------------
+  // These settings configure LEAN's live trading mode with Alpaca.
+  // API credentials are read from environment variables (see below).
+
+  "live-mode": false,
+  "live-mode-brokerage": "AlpacaBrokerage",
+
+  // Alpaca brokerage configuration.
+  // Values sourced from environment variables set in the systemd service unit.
+  // Do NOT put actual keys here.
+  "alpaca-access-token": "${ALPACA_KEY_ID}",
+  "alpaca-secret-key": "${ALPACA_SECRET_KEY}",
+
+  // Paper trading uses Alpaca's paper API endpoint (paper-api.alpaca.markets).
+  // Set to false only when you are ready to trade with real money.
+  "paper": "${ALPACA_PAPER_TRADING}",
+
+  // --------------------------------------------------------------------------
+  // Data subscriptions and feeds
+  // --------------------------------------------------------------------------
+
+  // Market data provider for live trading.
+  "data-provider": "QuantConnectDataProvider",
+
+  // Data queue handler: AlpacaBrokerage provides WebSocket market data.
+  "data-queue-handler": "AlpacaBrokerage",
+
+  // --------------------------------------------------------------------------
+  // Backtesting settings
+  // --------------------------------------------------------------------------
+
+  "backtest-timeout-minutes": 0,
+
+  // Starting cash for backtests (USD).
+  "starting-cash": 100000,
+
+  // --------------------------------------------------------------------------
+  // Risk management
+  // --------------------------------------------------------------------------
+
+  // Maximum portfolio drawdown before LEAN halts live trading.
+  // 0.10 = stop if portfolio drops more than 10% from peak.
+  "max-drawdown": 0.10,
+
+  // --------------------------------------------------------------------------
+  // Messaging and notifications
+  // --------------------------------------------------------------------------
+  // LEAN can send order and trade notifications via email.
+  // Configure SMTP settings via environment variables.
+
+  "messaging-handler": "QuantConnect.Messaging.Messaging",
+
+  // --------------------------------------------------------------------------
+  // Job and transaction management
+  // --------------------------------------------------------------------------
+
+  "job-queue-handler": "QuantConnect.Queues.JobQueue",
+  "api-handler": "QuantConnect.Api.Api",
+  "transaction-log": "/lean/Results/transaction-log.json",
+
+  // --------------------------------------------------------------------------
+  // QuantConnect Cloud (optional)
+  // --------------------------------------------------------------------------
+  // Required only if you want to sync strategies and results to QuantConnect
+  // cloud for research or use cloud data. Leave as empty strings if unused.
+
+  "job-user-id": "",
+  "api-access-token": "",
+  "job-project-id": 0,
+
+  // --------------------------------------------------------------------------
+  // Debugging
+  // --------------------------------------------------------------------------
+
+  "debugging": false,
+  "debugging-method": "LocalCmdline"
+}

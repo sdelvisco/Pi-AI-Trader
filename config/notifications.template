@@ -1,0 +1,117 @@
+# =============================================================================
+# Notification Settings Template
+# =============================================================================
+# Configures email and SMS/WhatsApp alerts for:
+#   - Trade executions (orders filled, partial fills, rejections)
+#   - System events (LEAN startup, shutdown, errors)
+#   - Daily summary reports
+#   - Risk alerts (drawdown limits hit, unusual activity)
+#
+# Copy this file to config/notifications.json and fill in your values.
+# config/notifications.json is excluded from git by .gitignore.
+#
+# The Flask web interface and the LEAN notification handler both read from
+# this file (via the application config loader, not directly).
+#
+# SECURITY: Set file permissions after populating:
+#   chmod 600 config/notifications.json
+# =============================================================================
+
+# =============================================================================
+# EMAIL NOTIFICATIONS (via SMTP)
+# =============================================================================
+# Recommended: Use a dedicated Gmail or Outlook account for trading alerts,
+# not your primary personal or work account.
+#
+# Gmail setup:
+#   1. Enable 2-Factor Authentication on the Gmail account
+#   2. Generate an App Password: Google Account → Security → App Passwords
+#   3. Use the App Password as EMAIL_PASSWORD (not your account password)
+#   4. SMTP host: smtp.gmail.com, port: 587, TLS: true
+#
+# Outlook/Hotmail setup:
+#   SMTP host: smtp-mail.outlook.com, port: 587, TLS: true
+# =============================================================================
+
+# Enable email notifications (true/false)
+EMAIL_ENABLED=true
+
+# SMTP server hostname
+EMAIL_SMTP_HOST=smtp.gmail.com
+
+# SMTP port (587 for STARTTLS, 465 for SSL)
+EMAIL_SMTP_PORT=587
+
+# Use STARTTLS encryption (recommended for port 587)
+EMAIL_USE_TLS=true
+
+# The "from" address for outgoing notification emails
+EMAIL_FROM_ADDRESS=your-trading-alerts@gmail.com
+
+# SMTP login username (usually the same as the from address for Gmail)
+EMAIL_USERNAME=your-trading-alerts@gmail.com
+
+# SMTP password or App Password (see setup instructions above)
+EMAIL_PASSWORD=YOUR_EMAIL_APP_PASSWORD_HERE
+
+# Destination address(es) for notifications (comma-separated for multiple)
+EMAIL_TO_ADDRESSES=your-personal-email@example.com
+
+# =============================================================================
+# SMS NOTIFICATIONS (via Twilio)
+# =============================================================================
+# Twilio provides SMS and WhatsApp messaging via REST API.
+#
+# Setup:
+#   1. Create a Twilio account at https://www.twilio.com
+#   2. Verify your personal phone number in the console
+#   3. Get a free trial phone number (for testing) or a paid number
+#   4. Copy your Account SID and Auth Token from the Twilio console
+#
+# Cost note: SMS costs approximately $0.0075/message. For a moderately active
+# strategy generating ~10 alerts/day, this is roughly $2.25/month.
+# =============================================================================
+
+# Enable SMS notifications via Twilio (true/false)
+SMS_ENABLED=false
+
+# Twilio Account SID (from https://console.twilio.com)
+TWILIO_ACCOUNT_SID=YOUR_TWILIO_ACCOUNT_SID_HERE
+
+# Twilio Auth Token (from Twilio console — treat like a password)
+TWILIO_AUTH_TOKEN=YOUR_TWILIO_AUTH_TOKEN_HERE
+
+# Your Twilio phone number (the "from" number, in E.164 format: +1XXXXXXXXXX)
+TWILIO_FROM_NUMBER=+1XXXXXXXXXX
+
+# Your personal phone number to receive SMS alerts (E.164 format)
+TWILIO_TO_NUMBER=+1XXXXXXXXXX
+
+# =============================================================================
+# NOTIFICATION PREFERENCES
+# =============================================================================
+# Control which events trigger notifications and via which channels.
+# =============================================================================
+
+# Notify on every order fill (can be high volume for active strategies)
+NOTIFY_ON_ORDER_FILL=true
+
+# Notify on order rejections or cancellations
+NOTIFY_ON_ORDER_REJECTION=true
+
+# Notify when LEAN starts or stops live trading
+NOTIFY_ON_SYSTEM_START_STOP=true
+
+# Notify when an error occurs in the trading engine
+NOTIFY_ON_ERROR=true
+
+# Send a daily portfolio summary at this time (24-hour HH:MM, local time)
+DAILY_SUMMARY_TIME=17:30
+
+# Risk alert: notify if daily P&L exceeds this loss threshold (positive = loss)
+# Example: 500 means alert if you lose more than $500 in a day
+DAILY_LOSS_ALERT_THRESHOLD=500
+
+# Risk alert: notify if portfolio drawdown from peak exceeds this percentage
+# Example: 0.05 means alert at 5% drawdown
+DRAWDOWN_ALERT_THRESHOLD=0.05

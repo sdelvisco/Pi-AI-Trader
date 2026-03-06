@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Performance — Pi-AI-Trader{% endblock %}
+{% block content %}
+<h5 class="mb-3"><i class="bi bi-graph-up-arrow"></i> Performance Metrics</h5>
+<div class="row g-3" id="performance-cards">
+    <div class="col-12 text-center text-muted py-5">
+        <i class="bi bi-hourglass-split fs-2"></i>
+        <p class="mt-2">Performance data will appear here once LEAN has generated results.</p>
+        <p class="small">Run a backtest or start live trading, then check the lean/Results directory.</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+fetch("/api/performance")
+    .then(r => r.json())
+    .then(data => {
+        const perf = data.performance;
+        if (!perf || Object.keys(perf).length === 0) return;
+
+        const container = document.getElementById("performance-cards");
+        container.innerHTML = Object.entries(perf).map(([key, value]) => `
+            <div class="col-6 col-md-3">
+                <div class="card bg-black border-secondary">
+                    <div class="card-body">
+                        <div class="text-muted small">${key.replace(/([A-Z])/g, ' $1').trim()}</div>
+                        <div class="fs-6 fw-bold">${value}</div>
+                    </div>
+                </div>
+            </div>
+        `).join("");
+    });
+</script>
+{% endblock %}
