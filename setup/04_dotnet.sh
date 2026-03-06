@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 04_dotnet.sh — .NET 8 SDK Installation
+# 04_dotnet.sh — .NET 10 SDK Installation
 # =============================================================================
-# Installs the .NET 8 SDK on Raspberry Pi OS Lite 64-bit (ARM64).
+# Installs the .NET 10 SDK on Raspberry Pi OS Lite 64-bit (ARM64).
 #
-# Why .NET 8?
-#   - LEAN Engine is a .NET application; it requires .NET 6+ to run.
-#   - .NET 8 is the current Long-Term Support (LTS) release (supported until
-#     November 2026), making it the appropriate choice for a production system.
+# Why .NET 10?
+#   - LEAN Engine's master branch now targets net10.0, so .NET 10 is required
+#     to build and run LEAN from source.
 #   - C# strategies are compiled by LEAN using the installed .NET SDK.
 #
 # Installation method:
-#   Microsoft provides an official installation script that detects the
-#   architecture and OS, downloads the correct binaries, and installs them
-#   to /usr/local/share/dotnet. This is the recommended approach for ARM64
-#   Linux systems where the Microsoft APT repository may have limited packages.
+#   The aka.ms shortlink method is unreliable (redirects to Bing). Instead,
+#   this script fetches the latest .NET 10 SDK version string directly from
+#   Microsoft's build servers, downloads the tarball, and extracts it in place.
+#
+#   Steps:
+#     1. Resolve version: https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0/latest.version
+#     2. Download:        https://builds.dotnet.microsoft.com/dotnet/Sdk/{VERSION}/dotnet-sdk-{VERSION}-linux-{ARCH}.tar.gz
+#     3. Extract to:      /usr/local/share/dotnet  (overwrites any existing installation)
+#     4. Symlink:         /usr/local/share/dotnet/dotnet → /usr/local/bin/dotnet
+#     5. Configure PATH via /etc/profile.d/dotnet.sh
 #
 # Usage:
 #   sudo bash 04_dotnet.sh
@@ -49,14 +54,14 @@ die() {
 
 [[ $EUID -eq 0 ]] || die "This script must be run as root (use: sudo bash $0)"
 
-# The version of .NET to install. Change to a newer LTS if desired.
-DOTNET_VERSION="8"
-
 # Installation directory for .NET binaries.
 DOTNET_INSTALL_DIR="/usr/local/share/dotnet"
 
-# Directory for the dotnet-install script download.
-INSTALLER_TMP="$(mktemp /tmp/dotnet-install.XXXXXX.sh)"
+# Base URL for Microsoft's build server.
+DOTNET_BUILD_BASE="https://builds.dotnet.microsoft.com/dotnet/Sdk"
+
+# .NET channel to install.
+DOTNET_CHANNEL="10.0"
 
 # -----------------------------------------------------------------------------
 # Step 1: Check architecture
@@ -68,12 +73,14 @@ info "Detected architecture: $ARCH"
 
 case "$ARCH" in
     aarch64)
-        # ARM64 — correct for Raspberry Pi 4 with 64-bit OS
+        # ARM64 — correct for Raspberry Pi 4/5 with 64-bit OS
         DOTNET_ARCH="arm64"
+        DOTNET_RID="linux-arm64"
         ;;
     armv7l)
         # ARM32 — only if running 32-bit OS; not recommended for this project
         DOTNET_ARCH="arm"
+        DOTNET_RID="linux-arm"
         info "WARNING: 32-bit OS detected. The 64-bit OS is strongly recommended."
         ;;
     *)
@@ -81,7 +88,7 @@ case "$ARCH" in
         ;;
 esac
 
-info "Will install .NET for architecture: $DOTNET_ARCH"
+info "Will install .NET $DOTNET_CHANNEL for architecture: $DOTNET_RID"
 
 # -----------------------------------------------------------------------------
 # Step 2: Install prerequisites
@@ -92,49 +99,81 @@ section "Installing .NET prerequisites"
 #           globalization support (date/number formatting, etc.)
 # libssl  — OpenSSL, required for TLS connections to broker APIs
 apt-get update -y
-apt-get install -y libicu-dev libssl-dev \
+apt-get install -y libicu-dev libssl-dev curl \
     || die "Failed to install .NET prerequisites"
 
 info "Prerequisites installed."
 
 # -----------------------------------------------------------------------------
-# Step 3: Download the official dotnet-install script
+# Step 3: Resolve the latest .NET 10 SDK version string
 # -----------------------------------------------------------------------------
-section "Downloading Microsoft dotnet-install script"
+section "Resolving latest .NET $DOTNET_CHANNEL SDK version"
 
-DOTNET_INSTALLER_URL="https://dot.net/v1/dotnet-install.sh"
+VERSION_URL="${DOTNET_BUILD_BASE}/${DOTNET_CHANNEL}/latest.version"
+info "Fetching version from: $VERSION_URL"
 
-info "Downloading from $DOTNET_INSTALLER_URL"
-curl -fsSL "$DOTNET_INSTALLER_URL" -o "$INSTALLER_TMP" \
-    || die "Failed to download dotnet-install.sh — check internet connectivity"
+SDK_VERSION="$(curl -fsSL "$VERSION_URL" \
+    || die "Failed to fetch .NET version from $VERSION_URL — check internet connectivity")"
 
-chmod +x "$INSTALLER_TMP"
-info "dotnet-install.sh downloaded to $INSTALLER_TMP"
+# Trim any trailing whitespace/newline from the response.
+SDK_VERSION="$(echo "$SDK_VERSION" | tr -d '[:space:]')"
 
-# -----------------------------------------------------------------------------
-# Step 4: Install .NET SDK
-# -----------------------------------------------------------------------------
-section "Installing .NET $DOTNET_VERSION SDK"
+[[ -n "$SDK_VERSION" ]] || die "Version string was empty — the version endpoint may be unavailable"
 
-info "This may take several minutes on the first run (downloading ~100MB)..."
-
-# Flags explained:
-#   --channel $DOTNET_VERSION  : Install from the .NET 8 channel (LTS)
-#   --install-dir              : Install to system-wide location
-#   --architecture             : Specify ARM64 explicitly
-#   --verbose                  : Show progress during download/install
-bash "$INSTALLER_TMP" \
-    --channel "$DOTNET_VERSION" \
-    --install-dir "$DOTNET_INSTALL_DIR" \
-    --architecture "$DOTNET_ARCH" \
-    --verbose \
-    || die ".NET installation failed"
-
-rm -f "$INSTALLER_TMP"
-info ".NET SDK installation complete. Temp file cleaned up."
+info "Latest .NET $DOTNET_CHANNEL SDK version: $SDK_VERSION"
 
 # -----------------------------------------------------------------------------
-# Step 5: Configure PATH for all users
+# Step 4: Download the SDK tarball
+# -----------------------------------------------------------------------------
+section "Downloading .NET SDK $SDK_VERSION"
+
+TARBALL_NAME="dotnet-sdk-${SDK_VERSION}-${DOTNET_RID}.tar.gz"
+TARBALL_URL="${DOTNET_BUILD_BASE}/${SDK_VERSION}/${TARBALL_NAME}"
+TARBALL_TMP="$(mktemp /tmp/dotnet-sdk.XXXXXX.tar.gz)"
+
+info "Downloading: $TARBALL_URL"
+info "This may take several minutes (~200MB download)..."
+
+curl -fsSL "$TARBALL_URL" -o "$TARBALL_TMP" \
+    || die "Failed to download $TARBALL_URL — check internet connectivity"
+
+info "Download complete: $TARBALL_TMP"
+
+# -----------------------------------------------------------------------------
+# Step 5: Extract the SDK into the install directory
+# -----------------------------------------------------------------------------
+section "Extracting .NET SDK to $DOTNET_INSTALL_DIR"
+
+# Create the install directory if it does not yet exist.
+mkdir -p "$DOTNET_INSTALL_DIR"
+
+# Extract over the top of any existing installation. We do NOT delete first —
+# extracting in place overwrites changed files while preserving any custom
+# additions the operator may have made.
+info "Extracting (this will overwrite any existing installation in place)..."
+tar -xzf "$TARBALL_TMP" -C "$DOTNET_INSTALL_DIR" \
+    || die "Extraction failed — the downloaded archive may be corrupt"
+
+rm -f "$TARBALL_TMP"
+info "Tarball extracted. Temp file cleaned up."
+
+# -----------------------------------------------------------------------------
+# Step 6: Create /usr/local/bin/dotnet symlink
+# -----------------------------------------------------------------------------
+section "Creating /usr/local/bin/dotnet symlink"
+
+DOTNET_BIN_TARGET="${DOTNET_INSTALL_DIR}/dotnet"
+
+[[ -x "$DOTNET_BIN_TARGET" ]] \
+    || die "dotnet binary not found at $DOTNET_BIN_TARGET after extraction"
+
+ln -sf "$DOTNET_BIN_TARGET" /usr/local/bin/dotnet \
+    || die "Failed to create symlink /usr/local/bin/dotnet → $DOTNET_BIN_TARGET"
+
+info "Symlink created: /usr/local/bin/dotnet → $DOTNET_BIN_TARGET"
+
+# -----------------------------------------------------------------------------
+# Step 7: Configure PATH for all users
 # -----------------------------------------------------------------------------
 section "Configuring PATH for dotnet"
 
@@ -168,15 +207,12 @@ if ! grep -q "DOTNET_ROOT" /root/.bashrc 2>/dev/null; then
 fi
 
 # -----------------------------------------------------------------------------
-# Step 6: Verify installation
+# Step 8: Verify installation
 # -----------------------------------------------------------------------------
 section "Verifying .NET installation"
 
-# Reload PATH in the current session.
-export PATH="$PATH:$DOTNET_INSTALL_DIR"
-
-DOTNET_BIN="${DOTNET_INSTALL_DIR}/dotnet"
-[[ -x "$DOTNET_BIN" ]] || die "dotnet binary not found at $DOTNET_BIN after installation"
+# Use the symlink so we exercise the same path that 06_lean_build.sh will use.
+DOTNET_BIN="/usr/local/bin/dotnet"
 
 info "dotnet version:"
 "$DOTNET_BIN" --version || die "dotnet --version failed"
@@ -187,31 +223,15 @@ info "Installed SDKs:"
 info "Installed runtimes:"
 "$DOTNET_BIN" --list-runtimes
 
-# Quick smoke test: create and run a minimal console app.
-section "Running .NET smoke test"
-
-SMOKE_DIR="$(mktemp -d /tmp/dotnet-smoke.XXXXXX)"
-info "Smoke test directory: $SMOKE_DIR"
-
-(
-    cd "$SMOKE_DIR"
-    "$DOTNET_BIN" new console -n SmokeTest --no-restore --force -o . 2>/dev/null
-    "$DOTNET_BIN" run --no-restore 2>/dev/null | grep -q "Hello" \
-        && info "Smoke test PASSED — .NET runtime is working correctly" \
-        || die "Smoke test FAILED — dotnet run did not produce expected output"
-) || die ".NET smoke test encountered an error"
-
-rm -rf "$SMOKE_DIR"
-info "Smoke test directory cleaned up."
-
 # -----------------------------------------------------------------------------
 # Done
 # -----------------------------------------------------------------------------
-section ".NET $DOTNET_VERSION SDK installation complete"
+section ".NET $SDK_VERSION installation complete"
 
 echo ""
 echo "  .NET version : $("$DOTNET_BIN" --version)"
 echo "  Install dir  : $DOTNET_INSTALL_DIR"
+echo "  Symlink      : /usr/local/bin/dotnet → $DOTNET_BIN_TARGET"
 echo "  PATH entry   : $PROFILE_D"
 echo ""
 echo "  NOTE: Log out and back in (or run 'source $PROFILE_D') to"

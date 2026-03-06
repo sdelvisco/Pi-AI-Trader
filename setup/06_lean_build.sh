@@ -8,7 +8,7 @@
 #
 #   - No Docker daemon is installed or required
 #   - No paid QuantConnect account is required
-#   - Builds run natively using the .NET 8 SDK already installed by 04_dotnet.sh
+#   - Builds run natively using the .NET 10 SDK already installed by 04_dotnet.sh
 #
 # What this script does:
 #   1. Clones QuantConnect/Lean             → /opt/lean-engine
@@ -29,7 +29,7 @@
 #   sudo bash 06_lean_build.sh
 #
 # Requirements:
-#   - 04_dotnet.sh must have been run (.NET 8 SDK at /usr/local/share/dotnet)
+#   - 04_dotnet.sh must have been run (.NET 10 SDK at /usr/local/share/dotnet)
 #   - Internet connectivity (for git clone)
 #   - Run as root or via sudo
 # =============================================================================
@@ -109,6 +109,11 @@ fi
 
 DOTNET_VERSION="$("$DOTNET_BIN" --version 2>/dev/null || echo unknown)"
 info ".NET SDK found: $DOTNET_VERSION"
+
+# LEAN master targets net10.0 — reject anything other than .NET 10.
+if [[ "$DOTNET_VERSION" != 10.* ]]; then
+    die ".NET 10 is required (LEAN master targets net10.0) but found: $DOTNET_VERSION — run 04_dotnet.sh to upgrade"
+fi
 
 # Verify git is installed (installed by 01_os_config.sh).
 if ! command -v git &>/dev/null; then
