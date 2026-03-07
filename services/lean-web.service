@@ -34,14 +34,19 @@ Wants=network-online.target
 # The web interface can start independently of the trading engine — it
 # gracefully handles the case where LEAN is not yet running.
 
+# Limit to 5 restart attempts within a 2-minute window. If the web interface
+# crashes more than 5 times in 2 minutes, systemd marks it as 'failed'.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
 [Service]
 # -------------------------------------------------------------------------
 # Identity
 # -------------------------------------------------------------------------
-User=pi
-Group=pi
+User=pi-admin
+Group=pi-admin
 
-WorkingDirectory=/home/pi/Pi-AI-Trader/web
+WorkingDirectory=/home/pi-admin/Pi-AI-Trader
 
 # -------------------------------------------------------------------------
 # Credentials — notification settings for email/SMS alerts triggered via UI.
@@ -71,7 +76,7 @@ Type=simple
 #   --access-logfile - : send access logs to stdout (captured by journal)
 #   --error-logfile -  : send error logs to stderr
 #   web.app:app     : the Flask application object in web/app.py
-ExecStart=/home/pi/Pi-AI-Trader/venv/bin/gunicorn \
+ExecStart=/home/pi-admin/Pi-AI-Trader/venv/bin/gunicorn \
     --workers 2 \
     --bind 0.0.0.0:5000 \
     --timeout 120 \
@@ -85,8 +90,6 @@ ExecStart=/home/pi/Pi-AI-Trader/venv/bin/gunicorn \
 # -------------------------------------------------------------------------
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=120
-StartLimitBurst=5
 
 # -------------------------------------------------------------------------
 # Resource limits
@@ -97,11 +100,11 @@ CPUQuota=50%
 # -------------------------------------------------------------------------
 # Security hardening
 # -------------------------------------------------------------------------
+# Note: ProtectSystem=strict is intentionally omitted. This is a local-only
+# service on a dedicated trading Pi; the strict namespace sandbox causes
+# exit code 226 (mount namespace failure) if expected ReadWritePaths don't
+# exist at start time (e.g. lean/Results). NoNewPrivileges is sufficient.
 NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=/home/pi/Pi-AI-Trader/web
-ReadWritePaths=/home/pi/Pi-AI-Trader/lean/Results
-ReadWritePaths=/tmp
 
 # -------------------------------------------------------------------------
 # Logging

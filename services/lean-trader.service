@@ -34,6 +34,12 @@ Documentation=https://github.com/sdelvisco/Pi-AI-Trader
 After=network-online.target
 Wants=network-online.target
 
+# Limit to 3 restart attempts within a 10-minute window. If LEAN crashes
+# more than 3 times in 10 minutes, systemd marks it as 'failed' and stops
+# trying — preventing runaway resource consumption or duplicate trades.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
 [Service]
 # -------------------------------------------------------------------------
 # Identity — run as the non-root project user, not root.
@@ -81,12 +87,6 @@ Restart=on-failure
 # Wait 60 seconds before attempting a restart. This prevents rapid-fire
 # restart loops if LEAN crashes immediately due to a configuration error.
 RestartSec=60
-
-# Limit to 3 restart attempts within a 10-minute window. If LEAN crashes
-# more than 3 times in 10 minutes, systemd marks it as 'failed' and stops
-# trying — preventing runaway resource consumption or duplicate trades.
-StartLimitIntervalSec=600
-StartLimitBurst=3
 
 # -------------------------------------------------------------------------
 # Resource limits
