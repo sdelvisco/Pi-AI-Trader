@@ -18,7 +18,7 @@
 #   The EnvironmentFile at /etc/tradingpi/alpaca.env must be:
 #     - Owned by root: sudo chown root:root /etc/tradingpi/alpaca.env
 #     - Readable only by root: sudo chmod 600 /etc/tradingpi/alpaca.env
-#   The service runs as the 'pi' user which must be in the 'docker' group.
+#   The service runs as the 'pi-admin' user (no Docker group required).
 #   To create the environment file:
 #     sudo mkdir -p /etc/tradingpi
 #     sudo cp config/alpaca_credentials.template /etc/tradingpi/alpaca.env
@@ -31,21 +31,18 @@ Description=Pi-AI-Trader LEAN Engine Live Trading
 Documentation=https://github.com/sdelvisco/Pi-AI-Trader
 
 # Start after the network is fully online (eth0 must have an IP for Alpaca API).
-After=network-online.target docker.service
+After=network-online.target
 Wants=network-online.target
-
-# Require Docker to be running before starting LEAN (Docker mode).
-Requires=docker.service
 
 [Service]
 # -------------------------------------------------------------------------
 # Identity — run as the non-root project user, not root.
 # -------------------------------------------------------------------------
-User=pi
-Group=pi
+User=pi-admin
+Group=pi-admin
 
-# Working directory — the LEAN workspace where lean.json lives.
-WorkingDirectory=/home/pi/Pi-AI-Trader/lean
+# Working directory — the LEAN engine build output directory.
+WorkingDirectory=/opt/lean-engine/Launcher/bin/Release
 
 # -------------------------------------------------------------------------
 # Credentials — loaded from a root-readable environment file.
@@ -57,22 +54,16 @@ EnvironmentFile=/etc/tradingpi/alpaca.env
 # Additional runtime environment variables.
 Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
 Environment=DOTNET_NOLOGO=1
-Environment=LEAN_WORKSPACE=/home/pi/Pi-AI-Trader/lean
 
 # -------------------------------------------------------------------------
 # Process management
 # -------------------------------------------------------------------------
 
 # 'simple' — systemd considers the service started when ExecStart forks.
-# The lean CLI manages the Docker container process lifecycle.
 Type=simple
 
-# The lean CLI command to run the configured live trading algorithm.
-# --detach is NOT used — we want the process to stay in the foreground so
-# systemd can track it and capture its output to the journal.
-ExecStart=/home/pi/Pi-AI-Trader/venv/bin/lean live \
-    --lean-config /home/pi/Pi-AI-Trader/lean/lean.json \
-    --output /home/pi/Pi-AI-Trader/lean/Results
+# Run LEAN natively via .NET — no Docker required.
+ExecStart=/usr/local/bin/dotnet /opt/lean-engine/Launcher/bin/Release/QuantConnect.Lean.Launcher.dll
 
 # Graceful stop: send SIGTERM to allow LEAN to close open positions and
 # flush state before exiting. Give it up to 5 minutes.
@@ -101,7 +92,7 @@ StartLimitBurst=3
 # Resource limits
 # -------------------------------------------------------------------------
 
-# Limit RAM usage. The Pi 4 has 4GB; Docker + LEAN + OS leave ~2.5GB for LEAN.
+# Limit RAM usage. The Pi 4 has 4GB; native .NET + OS leave ~3GB for LEAN.
 # Adjust based on your algorithm's memory requirements.
 MemoryMax=2048M
 
@@ -118,10 +109,8 @@ CPUQuota=300%
 NoNewPrivileges=true
 
 # Restrict write access to the filesystem — allow only necessary paths.
-# ReadWritePaths includes the LEAN workspace (results/logs) and Docker socket.
 ProtectSystem=strict
-ReadWritePaths=/home/pi/Pi-AI-Trader/lean
-ReadWritePaths=/var/run/docker.sock
+ReadWritePaths=/opt/lean-engine/Launcher/bin/Release
 ReadWritePaths=/tmp
 
 # -------------------------------------------------------------------------
