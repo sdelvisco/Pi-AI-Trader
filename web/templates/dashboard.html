@@ -13,7 +13,7 @@
     <div class="col-6 col-lg-3">
         <div class="card bg-black border-secondary h-100">
             <div class="card-body">
-                <div class="text-muted small">Engine</div>
+                <div class="text-muted-light small">Engine</div>
                 <div class="fs-5 fw-bold" id="card-engine-status">—</div>
             </div>
         </div>
@@ -23,7 +23,7 @@
     <div class="col-6 col-lg-3">
         <div class="card bg-black border-secondary h-100">
             <div class="card-body">
-                <div class="text-muted small">Portfolio Value</div>
+                <div class="text-muted-light small">Portfolio Value</div>
                 <div class="fs-5 fw-bold text-success" id="card-portfolio-value">—</div>
             </div>
         </div>
@@ -33,7 +33,7 @@
     <div class="col-6 col-lg-3">
         <div class="card bg-black border-secondary h-100">
             <div class="card-body">
-                <div class="text-muted small">Daily P&amp;L</div>
+                <div class="text-muted-light small">Daily P&amp;L</div>
                 <div class="fs-5 fw-bold" id="card-daily-pnl">—</div>
             </div>
         </div>
@@ -43,7 +43,7 @@
     <div class="col-6 col-lg-3">
         <div class="card bg-black border-secondary h-100">
             <div class="card-body">
-                <div class="text-muted small">CPU Temp</div>
+                <div class="text-muted-light small">CPU Temp</div>
                 <div class="fs-5 fw-bold" id="card-cpu-temp">—</div>
             </div>
         </div>
@@ -61,7 +61,7 @@
             <div class="card-body p-0">
                 <div class="table-responsive">
                     <table class="table table-dark table-hover table-sm mb-0">
-                        <thead class="text-muted small">
+                        <thead class="text-muted-light small">
                             <tr>
                                 <th>Symbol</th>
                                 <th class="text-end">Qty</th>
@@ -72,7 +72,7 @@
                         </thead>
                         <tbody id="positions-table-body">
                             <tr>
-                                <td colspan="5" class="text-center text-muted py-3">
+                                <td colspan="5" class="text-center text-muted-light py-3">
                                     Loading positions...
                                 </td>
                             </tr>
@@ -92,7 +92,7 @@
             <div class="card-body">
                 <div class="mb-3">
                     <div class="d-flex justify-content-between small mb-1">
-                        <span class="text-muted">Memory</span>
+                        <span class="text-muted-light">Memory</span>
                         <span id="health-memory-text">—</span>
                     </div>
                     <div class="progress" style="height: 6px;">
@@ -102,7 +102,7 @@
                 </div>
                 <div class="mb-3">
                     <div class="d-flex justify-content-between small mb-1">
-                        <span class="text-muted">Disk</span>
+                        <span class="text-muted-light">Disk</span>
                         <span id="health-disk-text">—</span>
                     </div>
                     <div class="progress" style="height: 6px;">
@@ -111,7 +111,7 @@
                     </div>
                 </div>
                 <div class="small">
-                    <span class="text-muted">CPU Temp:</span>
+                    <span class="text-muted-light">CPU Temp:</span>
                     <span id="health-cpu-temp">—</span>
                 </div>
             </div>
@@ -129,7 +129,7 @@
             <div class="card-body p-0">
                 <div class="table-responsive">
                     <table class="table table-dark table-hover table-sm mb-0">
-                        <thead class="text-muted small">
+                        <thead class="text-muted-light small">
                             <tr>
                                 <th>Time</th>
                                 <th>Symbol</th>
@@ -141,7 +141,7 @@
                         </thead>
                         <tbody id="trades-table-body">
                             <tr>
-                                <td colspan="6" class="text-center text-muted py-3">
+                                <td colspan="6" class="text-center text-muted-light py-3">
                                     Loading trade history...
                                 </td>
                             </tr>
@@ -225,7 +225,7 @@ function refreshPositions() {
             document.getElementById("positions-count").textContent = positions.length;
 
             if (positions.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No open positions</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted-light py-3">No open positions</td></tr>';
                 return;
             }
 
@@ -255,14 +255,14 @@ function refreshTrades() {
             const trades = data.trades || [];
 
             if (trades.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">No recent trades</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted-light py-3">No recent trades</td></tr>';
                 return;
             }
 
             tbody.innerHTML = trades.slice(0, 20).map(t => {
                 const sideClass = (t.Direction || t.side || "").toLowerCase().includes("buy") ? "text-success" : "text-danger";
                 return `<tr>
-                    <td class="small text-muted">${t.Time || t.time || "—"}</td>
+                    <td class="small text-muted-light">${t.Time || t.time || "—"}</td>
                     <td class="fw-bold">${t.Symbol || t.symbol || "—"}</td>
                     <td class="${sideClass}">${t.Direction || t.side || "—"}</td>
                     <td class="text-end">${t.Quantity || t.qty || "—"}</td>
