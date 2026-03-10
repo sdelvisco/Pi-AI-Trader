@@ -10,7 +10,7 @@
     dotnet build strategies/csharp/DualMomentumV2.csproj -c Release
 
   Output:
-    strategies/csharp/bin/Release/DualMomentumV2.dll
+    strategies/csharp/bin/Release/PiAiTrader.Strategies.dll
 
   The produced DLL can be placed in the LEAN algorithm folder and referenced
   in lean.json as the algorithm-type-name entry point.
@@ -28,7 +28,7 @@
     <OutputType>Library</OutputType>
 
     <!-- Assembly / namespace identity. -->
-    <AssemblyName>DualMomentumV2</AssemblyName>
+    <AssemblyName>PiAiTrader.Strategies</AssemblyName>
     <RootNamespace>PiAiTrader.Strategies</RootNamespace>
 
     <!-- Emit to bin/Release/ so the DLL is easy to locate. -->
