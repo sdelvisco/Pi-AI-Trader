@@ -60,9 +60,13 @@ def create_app() -> Flask:
     app.config["PROJECT_ROOT"] = Path(__file__).parent.parent
 
     # Path to the LEAN results directory for reading trade logs and reports.
-    app.config["LEAN_RESULTS_DIR"] = (
-        Path(os.environ.get("LEAN_WORKSPACE", app.config["PROJECT_ROOT"] / "lean"))
-        / "Results"
+    # LEAN (when run via the Launcher) writes all output — live-state files,
+    # order-event logs, and performance JSON — directly into the Launcher's
+    # Release output directory, NOT into a project-local lean/Results/ folder.
+    # The default below matches the standard Pi-AI-Trader deployment path.
+    # Override with the LEAN_RESULTS_DIR environment variable if needed.
+    app.config["LEAN_RESULTS_DIR"] = Path(
+        os.environ.get("LEAN_RESULTS_DIR", "/opt/lean-engine/Launcher/bin/Release")
     )
 
     # -----------------------------------------------------------------------

@@ -88,41 +88,88 @@ def status():
 @api_bp.route("/positions")
 def positions():
     """
-    Returns current open positions from the most recent LEAN state file.
+    Returns current open positions from the LEAN live-state file.
 
-    LEAN writes a live-results.json to the results directory during live
-    trading. This endpoint reads that file for position data.
+    LEAN writes algorithm state to a JSON file named after the algorithm
+    class, e.g. PiAiTrader.Strategies.DualMomentumV2.json, directly in the
+    Launcher's Release output directory (LEAN_RESULTS_DIR).
+
+    LEAN uses abbreviated keys in the holdings objects:
+      "a"  = average price
+      "q"  = quantity
+      "p"  = last price
+      "v"  = market value
+      "u"  = unrealized P&L
+      "up" = unrealized P&L percent
+
+    Cash is reported under cash.USD.amount; total portfolio value is
+    the sum of all position market values plus the cash balance.
     """
     results_dir = _lean_results_dir()
 
-    # LEAN names the result file after the algorithm; try to find it.
-    result_files = list(results_dir.glob("**/live-*.json")) if results_dir.exists() else []
+    # -------------------------------------------------------------------
+    # Locate the LEAN live-state file.
+    # Primary: look for the exact well-known filename in LEAN_RESULTS_DIR.
+    # Fallback: glob for any JSON whose name contains the algorithm class.
+    # -------------------------------------------------------------------
+    algo_name   = "PiAiTrader.Strategies.DualMomentumV2"
+    direct_path = results_dir / f"{algo_name}.json"
 
-    if not result_files:
-        return jsonify({"positions": [], "message": "No live results file found"})
+    if results_dir.exists() and direct_path.exists():
+        state_file = direct_path
+    else:
+        # Fallback: search recursively for a file whose name contains the
+        # algorithm class name (handles date-stamped variants LEAN may write).
+        candidates = (
+            list(results_dir.glob(f"**/*{algo_name}*.json"))
+            if results_dir.exists()
+            else []
+        )
+        if not candidates:
+            return jsonify({"positions": [], "message": "No live results file found"})
+        state_file = max(candidates, key=lambda p: p.stat().st_mtime)
 
-    # Use the most recently modified results file.
-    latest = max(result_files, key=lambda p: p.stat().st_mtime)
-    data = _read_json_safe(latest)
-
+    data = _read_json_safe(state_file)
     if data is None:
         return jsonify({"positions": [], "message": "Could not parse results file"})
 
-    # Extract holdings from LEAN's result schema.
-    holdings = data.get("Holdings", {})
+    # -------------------------------------------------------------------
+    # Parse holdings using LEAN's abbreviated key schema.
+    # -------------------------------------------------------------------
+    holdings = data.get("holdings", {})
     positions_list = [
         {
-            "symbol": symbol,
-            "quantity": holding.get("Quantity", 0),
-            "average_price": holding.get("AveragePrice", 0),
-            "market_value": holding.get("MarketValue", 0),
-            "unrealized_pnl": holding.get("UnrealizedPnL", 0),
+            "symbol":           symbol,
+            "quantity":         holding.get("q", 0),
+            "average_price":    holding.get("a", 0),
+            "last_price":       holding.get("p", 0),
+            "market_value":     holding.get("v", 0),
+            "unrealized_pnl":   holding.get("u", 0),
+            "unrealized_pnl_pct": holding.get("up", 0),
         }
         for symbol, holding in holdings.items()
-        if holding.get("Quantity", 0) != 0
+        if holding.get("q", 0) != 0
     ]
 
-    return jsonify({"positions": positions_list})
+    # -------------------------------------------------------------------
+    # Extract cash balance and compute total portfolio value.
+    # LEAN stores cash as: cash → USD → amount
+    # -------------------------------------------------------------------
+    cash_usd = (
+        data.get("cash", {})
+            .get("USD", {})
+            .get("amount", 0)
+    )
+    total_market_value = sum(p["market_value"] for p in positions_list)
+    total_portfolio_value = total_market_value + cash_usd
+
+    return jsonify(
+        {
+            "positions":            positions_list,
+            "cash_usd":             cash_usd,
+            "total_portfolio_value": total_portfolio_value,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -132,16 +179,34 @@ def positions():
 @api_bp.route("/trades")
 def trades():
     """
-    Returns recent order/trade history from the LEAN transaction log.
+    Returns recent order/trade history from the LEAN order-events file.
+
+    LEAN writes order events to a file named:
+      PiAiTrader.Strategies.DualMomentumV2-<date>-order-events.json
+    where <date> is a UTC timestamp appended at run start.  If multiple
+    files exist (e.g. after engine restarts) the most recently modified
+    one is used.
     """
     results_dir = _lean_results_dir()
-    transaction_log = results_dir / "transaction-log.json"
 
-    data = _read_json_safe(transaction_log)
+    # Find all order-event log files for this algorithm.
+    order_event_files = (
+        list(results_dir.glob("**/PiAiTrader.Strategies.DualMomentumV2-*-order-events.json"))
+        if results_dir.exists()
+        else []
+    )
+
+    if not order_event_files:
+        return jsonify({"trades": [], "message": "No order-events file found"})
+
+    # Use the most recently modified file (latest engine run).
+    latest = max(order_event_files, key=lambda p: p.stat().st_mtime)
+    data = _read_json_safe(latest)
+
     if data is None:
-        return jsonify({"trades": [], "message": "No transaction log found"})
+        return jsonify({"trades": [], "message": "Could not parse order-events file"})
 
-    # Return the most recent 50 trades, newest first.
+    # Return the most recent 50 order events, newest first.
     trade_list = data if isinstance(data, list) else []
     return jsonify({"trades": trade_list[-50:][::-1]})
 
@@ -153,19 +218,31 @@ def trades():
 @api_bp.route("/performance")
 def performance():
     """
-    Returns portfolio performance statistics from LEAN's output.
+    Returns portfolio performance statistics from LEAN's 10-minute report.
+
+    LEAN writes rolling performance snapshots to files named:
+      PiAiTrader.Strategies.DualMomentumV2-<date>_10minute.json
+    If multiple snapshots exist (engine restarts / multiple runs) the most
+    recently modified one is used.
     """
     results_dir = _lean_results_dir()
-    stats_files = list(results_dir.glob("**/*Statistics*.json")) if results_dir.exists() else []
 
-    if not stats_files:
-        return jsonify({"performance": {}, "message": "No statistics file found"})
+    # Find all 10-minute performance snapshot files for this algorithm.
+    perf_files = (
+        list(results_dir.glob("**/PiAiTrader.Strategies.DualMomentumV2-*_10minute.json"))
+        if results_dir.exists()
+        else []
+    )
 
-    latest = max(stats_files, key=lambda p: p.stat().st_mtime)
+    if not perf_files:
+        return jsonify({"performance": {}, "message": "No performance file found"})
+
+    # Use the most recently modified snapshot (latest engine run).
+    latest = max(perf_files, key=lambda p: p.stat().st_mtime)
     data = _read_json_safe(latest)
 
     if data is None:
-        return jsonify({"performance": {}, "message": "Could not parse statistics"})
+        return jsonify({"performance": {}, "message": "Could not parse performance file"})
 
     return jsonify({"performance": data})
 
