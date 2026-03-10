@@ -383,7 +383,7 @@ namespace PiAiTrader.Strategies
                 {
                     var targetQty = (long)(1.0m * Portfolio.TotalPortfolioValue / defPrice);
                     var delta     = targetQty - (long)Portfolio[defSym].Quantity;
-                    if (delta != 0) MarketOrder(defSym, delta);
+                    if (delta != 0) MarketOrder(defSym, (decimal)delta);
                 }
                 Log($"[Defensive] Target: 100% {DefensiveTicker}");
                 return;
@@ -441,7 +441,7 @@ namespace PiAiTrader.Strategies
                 {
                     var targetQty = (long)(PositionWeight * Portfolio.TotalPortfolioValue / Securities[sym].Price);
                     var delta     = targetQty - (long)Portfolio[sym].Quantity;
-                    if (delta != 0) MarketOrder(sym, delta);
+                    if (delta != 0) MarketOrder(sym, (decimal)delta);
                     // Record the current price as the "entry price" for stop-loss tracking.
                     // (Will be refined by OnOrderEvent fill price — this is a best-effort
                     //  initialisation in case OnOrderEvent is delayed.)
@@ -544,7 +544,7 @@ namespace PiAiTrader.Strategies
                 {
                     var targetQty2 = (long)(1.0m * Portfolio.TotalPortfolioValue / defPrice2);
                     var delta2     = targetQty2 - (long)Portfolio[defSym2].Quantity;
-                    if (delta2 != 0) MarketOrder(defSym2, delta2);
+                    if (delta2 != 0) MarketOrder(defSym2, (decimal)delta2);
                 }
                 _entryPrices.Clear();
 
