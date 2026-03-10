@@ -239,6 +239,20 @@ namespace PiAiTrader.Strategies
             SetBrokerageModel(BrokerageName.Alpaca, AccountType.Margin);
 
             // ------------------------------------------------------------------
+            // Default order properties — force Day-validity market orders so
+            // that orders submitted at any time during the trading session are
+            // accepted by the Alpaca brokerage model.  Without this setting,
+            // AlpacaBrokerageModel wraps SetHoldings() / Liquidate() calls in
+            // MarketOnOpen orders, which are only valid for submission between
+            // 07:00–09:28 local time and are rejected when OnData fires outside
+            // that window with: "MarketOnOpen submission time is invalid."
+            // ------------------------------------------------------------------
+            DefaultOrderProperties = new AlpacaOrderProperties
+            {
+                TimeInForce = TimeInForce.Day
+            };
+
+            // ------------------------------------------------------------------
             // Subscribe to daily equity bars for every universe ticker.
             // Daily resolution is sufficient for a monthly-rebalance strategy.
             // ------------------------------------------------------------------
@@ -359,7 +373,18 @@ namespace PiAiTrader.Strategies
                 // ── Risk-off: go fully defensive ────────────────────────────────
                 Log("[Defensive] Moving 100% to AGG (absolute momentum filter: RISK-OFF).");
                 LiquidateAllExcept(DefensiveTicker);
-                SetHoldings(_symbols[DefensiveTicker], 1.0m);
+                // Use an explicit MarketOrder instead of SetHoldings() so that
+                // the Day TimeInForce on DefaultOrderProperties is respected and
+                // the order is not downgraded to a MarketOnOpen by the Alpaca
+                // brokerage model.
+                var defSym   = _symbols[DefensiveTicker];
+                var defPrice = Securities[defSym].Price;
+                if (defPrice > 0)
+                {
+                    var targetQty = (long)(1.0m * Portfolio.TotalPortfolioValue / defPrice);
+                    var delta     = targetQty - (long)Portfolio[defSym].Quantity;
+                    if (delta != 0) MarketOrder(defSym, delta);
+                }
                 Log($"[Defensive] Target: 100% {DefensiveTicker}");
                 return;
             }
@@ -407,12 +432,19 @@ namespace PiAiTrader.Strategies
             foreach (var ticker in topTickers)
             {
                 var sym = _symbols[ticker];
-                SetHoldings(sym, PositionWeight);
-                // Record the current price as the "entry price" for stop-loss tracking.
-                // (Will be refined by OnOrderEvent fill price — this is a best-effort
-                //  initialisation in case OnOrderEvent is delayed.)
+                // Use an explicit MarketOrder instead of SetHoldings() so that
+                // the Day TimeInForce on DefaultOrderProperties is respected.
+                // Target quantity = PositionWeight × TotalPortfolioValue / Price.
+                // Subtract the current held quantity to get only the incremental
+                // order needed (mirrors what SetHoldings() does internally).
                 if (Securities.ContainsKey(sym) && Securities[sym].Price > 0)
                 {
+                    var targetQty = (long)(PositionWeight * Portfolio.TotalPortfolioValue / Securities[sym].Price);
+                    var delta     = targetQty - (long)Portfolio[sym].Quantity;
+                    if (delta != 0) MarketOrder(sym, delta);
+                    // Record the current price as the "entry price" for stop-loss tracking.
+                    // (Will be refined by OnOrderEvent fill price — this is a best-effort
+                    //  initialisation in case OnOrderEvent is delayed.)
                     _entryPrices[sym] = Securities[sym].Price;
                 }
                 Log($"[Allocate] {ticker} → {PositionWeight:P0} (entry ~${_entryPrices.GetValueOrDefault(sym, 0):F2})");
@@ -461,10 +493,13 @@ namespace PiAiTrader.Strategies
                 }
             }
 
-            // Liquidate stopped positions.
+            // Liquidate stopped positions via explicit market sell orders so
+            // that Day TimeInForce is applied consistently (same reasoning as
+            // the SetHoldings → MarketOrder change above).
             foreach (var sym in toStop)
             {
-                Liquidate(sym);
+                var qty = Portfolio[sym].Quantity;
+                if (qty != 0) MarketOrder(sym, -qty);
                 _entryPrices.Remove(sym);
                 Log($"[StopLoss] Liquidated {sym.Value}.");
             }
@@ -498,8 +533,19 @@ namespace PiAiTrader.Strategies
                 _haltStartDate = Time;
 
                 // Liquidate everything and go to 100% AGG.
+                // Use an explicit MarketOrder instead of SetHoldings() — same
+                // reason as in Rebalance(): Day market orders work at any time
+                // of day, while SetHoldings() under AlpacaBrokerageModel would
+                // emit a MarketOnOpen that is rejected outside 07:00–09:28.
                 LiquidateAllExcept(DefensiveTicker);
-                SetHoldings(_symbols[DefensiveTicker], 1.0m);
+                var defSym2   = _symbols[DefensiveTicker];
+                var defPrice2 = Securities[defSym2].Price;
+                if (defPrice2 > 0)
+                {
+                    var targetQty2 = (long)(1.0m * Portfolio.TotalPortfolioValue / defPrice2);
+                    var delta2     = targetQty2 - (long)Portfolio[defSym2].Quantity;
+                    if (delta2 != 0) MarketOrder(defSym2, delta2);
+                }
                 _entryPrices.Clear();
 
                 Log($"[DrawdownHalt] Halt mode entered on {_haltStartDate:yyyy-MM-dd}. " +
@@ -620,7 +666,10 @@ namespace PiAiTrader.Strategies
                 if (!keepSet.Contains(ticker))
                 {
                     Log($"[Liquidate] Exiting {ticker} (not in new target set).");
-                    Liquidate(holding.Symbol);
+                    // Use MarketOrder instead of Liquidate() for consistent Day
+                    // TimeInForce behaviour under AlpacaBrokerageModel.
+                    var holdQty = Portfolio[holding.Symbol].Quantity;
+                    if (holdQty != 0) MarketOrder(holding.Symbol, -holdQty);
                     _entryPrices.Remove(holding.Symbol);
                 }
             }
