@@ -273,6 +273,22 @@ namespace PiAiTrader.Strategies
             Log($"Halt cooloff      : {HaltCooloffMonths} months");
             Log($"Stop-loss         : {StopLossThreshold:P0} per position");
             Log($"Defensive asset   : {DefensiveTicker}");
+
+            // Schedule monthly rebalancing at 9:15 AM ET on the first trading day of each month.
+            // This ensures orders are submitted during the valid MarketOnOpen window (7:00-9:28).
+            Schedule.On(
+                DateRules.MonthStart(Securities.Keys.First()),
+                TimeRules.At(9, 15),
+                () => {
+                    // Safety guard against duplicate execution.
+                    if (Time.Month != _lastRebalanceMonth)
+                    {
+                        _lastRebalanceMonth = Time.Month;
+                        Log($"[Rebalance] Triggered on {Time:yyyy-MM-dd} (first trading day of {Time:MMMM yyyy})");
+                        Rebalance();
+                    }
+                }
+            );
         }
 
         // =====================================================================
@@ -285,7 +301,7 @@ namespace PiAiTrader.Strategies
         ///   1. Updating the peak portfolio value tracker.
         ///   2. Checking per-position stop-losses.
         ///   3. Evaluating max-drawdown halt condition.
-        ///   4. Triggering monthly rebalance on the first trading day of the month.
+        /// Note: Monthly rebalancing is now handled via Schedule.On() at 9:15 AM, not in OnData().
         /// </summary>
         public override void OnData(Slice data)
         {
@@ -318,17 +334,6 @@ namespace PiAiTrader.Strategies
                 CheckDrawdownHalt();
                 // CheckDrawdownHalt() may flip _haltActive = true; return early.
                 if (_haltActive) return;
-            }
-
-            // ── 4. Monthly rebalance — first trading day of each calendar month ─
-            // IsMarketOpen() gates ensure we only act on liquid trading sessions.
-            // We compare the current month to the last-rebalanced month to avoid
-            // triggering more than once per month.
-            if (Time.Month != _lastRebalanceMonth)
-            {
-                _lastRebalanceMonth = Time.Month;
-                Log($"[Rebalance] Triggered on {Time:yyyy-MM-dd} (first trading day of {Time:MMMM yyyy})");
-                Rebalance();
             }
         }
 
