@@ -233,13 +233,26 @@ function refreshPositions() {
                 const pnlClass = p.unrealized_pnl >= 0 ? "text-success" : "text-danger";
                 const pnlSign  = p.unrealized_pnl >= 0 ? "+" : "";
                 return `<tr>
-                    <td class="fw-bold">${p.symbol}</td>
+                    <td class="fw-bold">${p.symbolValue || p.symbol}</td>
                     <td class="text-end">${p.quantity}</td>
                     <td class="text-end">$${p.average_price.toFixed(2)}</td>
                     <td class="text-end">$${p.market_value.toLocaleString('en-US', {minimumFractionDigits: 2})}</td>
                     <td class="text-end ${pnlClass}">${pnlSign}$${p.unrealized_pnl.toFixed(2)}</td>
                 </tr>`;
             }).join("");
+
+            // Update portfolio value card
+            const portfolioValue = data.total_portfolio_value || 0;
+            document.getElementById("card-portfolio-value").textContent =
+                `$${portfolioValue.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+
+            // Calculate and update daily P&L card (sum of all unrealized P&L)
+            const totalPnL = positions.reduce((sum, p) => sum + (p.unrealized_pnl || 0), 0);
+            const pnlElement = document.getElementById("card-daily-pnl");
+            const pnlClass = totalPnL >= 0 ? "text-success" : "text-danger";
+            const pnlSign = totalPnL >= 0 ? "+" : "";
+            pnlElement.textContent = `${pnlSign}$${totalPnL.toFixed(2)}`;
+            pnlElement.className = `fs-5 fw-bold ${pnlClass}`;
         })
         .catch(() => {
             document.getElementById("positions-table-body").innerHTML =
@@ -260,14 +273,34 @@ function refreshTrades() {
             }
 
             tbody.innerHTML = trades.slice(0, 20).map(t => {
-                const sideClass = (t.Direction || t.side || "").toLowerCase().includes("buy") ? "text-success" : "text-danger";
+                // Format timestamp
+                const timestamp = t.time || t.Time;
+                const date = new Date(timestamp * 1000); // Convert Unix epoch to milliseconds
+                const timeStr = date.toLocaleString('en-US', {
+                    month: 'short',
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                });
+
+                // Get direction and set color
+                const direction = t.direction || t.Direction || "";
+                const sideClass = direction.toLowerCase().includes("buy") ? "text-success" : "text-danger";
+                const sideText = direction.charAt(0).toUpperCase() + direction.slice(1); // Capitalize
+
+                // Get quantity - check multiple possible field names
+                const quantity = t.quantity || t.fillQuantity || t.Quantity || "—";
+
+                // Use clean symbol name
+                const symbol = t.symbolValue || t.Symbol || t.symbol || "—";
+
                 return `<tr>
-                    <td class="small text-muted-light">${t.Time || t.time || "—"}</td>
-                    <td class="fw-bold">${t.Symbol || t.symbol || "—"}</td>
-                    <td class="${sideClass}">${t.Direction || t.side || "—"}</td>
-                    <td class="text-end">${t.Quantity || t.qty || "—"}</td>
-                    <td class="text-end">$${(t.FillPrice || t.price || 0).toFixed(2)}</td>
-                    <td><span class="badge bg-secondary">${t.Status || t.status || "filled"}</span></td>
+                    <td class="small text-muted-light">${timeStr}</td>
+                    <td class="fw-bold">${symbol}</td>
+                    <td class="${sideClass}">${sideText}</td>
+                    <td class="text-end">${quantity}</td>
+                    <td class="text-end">$${(t.fillPrice || 0).toFixed(2)}</td>
+                    <td><span class="badge bg-${t.status === 'filled' ? 'success' : t.status === 'invalid' ? 'danger' : 'secondary'}">${t.status || 'unknown'}</span></td>
                 </tr>`;
             }).join("");
         })
