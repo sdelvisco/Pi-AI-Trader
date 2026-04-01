@@ -140,6 +140,7 @@ def positions():
     positions_list = [
         {
             "symbol":           symbol,
+            "symbolValue":      symbol.split()[0] if ' ' in symbol else symbol,
             "quantity":         holding.get("q", 0),
             "average_price":    holding.get("a", 0),
             "last_price":       holding.get("p", 0),
