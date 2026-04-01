@@ -120,6 +120,16 @@
       <Private>false</Private>
     </Reference>
 
+    <!--
+      NodaTime.dll
+      Date/time library used by LEAN's scheduling system (Schedule.On()).
+      Required for DateRules and TimeRules functionality.
+    -->
+    <Reference Include="NodaTime">
+      <HintPath>/opt/lean-engine/Launcher/bin/Release/NodaTime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
   </ItemGroup>
 
 </Project>
