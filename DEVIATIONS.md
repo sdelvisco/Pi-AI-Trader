@@ -69,21 +69,19 @@ This file tracks all known differences between the documented/designed architect
   `DualMomentumV2.csproj`. Build now produces `PiAiTrader.Strategies.dll` directly.
   No rename needed on copy.
 
-### MarketOrder instead of SetHoldings/Liquidate
-- **Date discovered:** 2026-03-10
-- **Reason:** `AlpacaBrokerageModel` converts `SetHoldings()` and `Liquidate()` calls
-  into `MarketOnOpen` orders, which are only valid for submission between 07:00–09:28
-  local time. When `OnData` fires outside that window all orders are rejected:
-  `NotSupported: MarketOnOpen submission time is invalid`.
-- **Change:** Added `DefaultOrderProperties = new AlpacaOrderProperties
-  { TimeInForce = TimeInForce.Day }` in `Initialize()`. Replaced all `SetHoldings()`
-  calls with explicit `MarketOrder()` calls calculating share quantity from
-  `PositionWeight * TotalPortfolioValue / Price`. Replaced all `Liquidate()` calls
-  with `MarketOrder(sym, -Portfolio[sym].Quantity)`. All quantity arguments explicitly
-  cast to `(decimal)` to resolve `CS0121` ambiguity between `MarketOrder(Symbol,
-  double)` and `MarketOrder(Symbol, decimal)` overloads.
-- **Verification:** Fix will be confirmed on first rebalance (first trading day of
-  April 2026).
+**Deviation: Schedule.On() for Monthly Rebalancing**
+- **File:** `strategies/csharp/DualMomentumV2.cs`
+- **Date:** 2026-04-01 (replaces 2026-03-10 MarketOrder approach)
+- **Reason:** With `Resolution.Daily`, LEAN automatically converts ALL `MarketOrder()` calls to `MarketOnOpen` orders to prevent execution on stale end-of-day prices. This is a hard LEAN safety feature that cannot be overridden. The original fix (switching from `SetHoldings()` to `MarketOrder()` with `TimeInForce.Day`) did not resolve the issue because the conversion to `MarketOnOpen` still occurred. Since `MarketOnOpen` orders are only valid for submission between 07:00–09:28 local time, rebalancing triggered in `OnData()` at 4:00 PM (market close with daily bars) resulted in invalid orders.
+- **Change:** Removed monthly rebalancing logic from `OnData()`. Added `Schedule.On(DateRules.MonthStart(), TimeRules.At(9, 15), ...)` in `Initialize()` to trigger rebalancing at 9:15 AM ET on the first trading day of each month. This ensures all orders are submitted during the valid `MarketOnOpen` window (07:00–09:28). The `_lastRebalanceMonth` guard remains in place to prevent duplicate execution. Stop-loss and drawdown checks remain in `OnData()` for daily monitoring.
+- **Dependencies:** Requires `NodaTime.dll` reference in `.csproj` for `DateRules` and `TimeRules` functionality.
+- **Verification:** Fix will be confirmed on first rebalance (first trading day of May 2026).
+
+**Deviation: NodaTime Assembly Reference**
+- **File:** `strategies/csharp/DualMomentumV2.csproj`
+- **Date:** 2026-04-01
+- **Reason:** `Schedule.On()` requires the `NodaTime` library for timezone-aware scheduling (`DateRules` and `TimeRules`). Without this reference, the build fails with `CS0012: The type 'DateTimeZone' is defined in an assembly that is not referenced`.
+- **Change:** Added `<Reference Include="NodaTime">` pointing to `/opt/lean-engine/Launcher/bin/Release/NodaTime.dll` in the `.csproj` file, consistent with other LEAN assembly references.
 
 ---
 
@@ -101,15 +99,25 @@ This file tracks all known differences between the documented/designed architect
 
 ---
 
-## Known Cosmetic Issues (not yet fixed)
+## Dashboard Display Issues - Fixed 2026-04-01
 
-| Issue | Location | Date noted |
-|-------|----------|------------|
-| Symbol names show LEAN internal format (`EEM SNQLASP67O85`) instead of clean ticker (`EEM`) | Dashboard positions table | 2026-03-10 |
-| Portfolio Value and Daily P&L cards show dashes — JS field name mismatch with API response | Dashboard summary cards | 2026-03-10 |
-| Recent Trades TIME column shows raw Unix timestamp instead of human-readable date | Dashboard trades table | 2026-03-10 |
-| Recent Trades SIDE and QTY show dashes for rejected orders — correct but could be labeled more clearly | Dashboard trades table | 2026-03-10 |
+The following cosmetic issues were resolved by updates to `web/templates/dashboard.html` and `web/routes/api.py`:
+
+- **Portfolio Value and Daily P&L cards** now populate correctly. Added JavaScript in `refreshPositions()` to read `total_portfolio_value` from the API and calculate Daily P&L as the sum of all position `unrealized_pnl` values.
+- **Symbol names** display clean tickers (e.g. `EEM`) instead of LEAN's internal format (e.g. `EEM SNQLASP67O85`). Frontend uses `p.symbolValue || p.symbol` fallback; backend API adds `symbolValue` field by extracting the ticker before the first space.
+- **Trade timestamps** format as human-readable dates (e.g. `Apr 1, 04:06 PM`) instead of Unix epoch timestamps. JavaScript converts Unix timestamps to localized date strings.
+- **Trade direction and quantities** now display correctly. JavaScript handles multiple field name variants (`direction`/`Direction`, `quantity`/`fillQuantity`) and capitalizes direction text.
+- **Frontend changes:** `web/templates/dashboard.html` - Added Portfolio/P&L card population, timestamp formatting, `symbolValue` usage, color-coded P&L display.
+- **Backend changes:** `web/routes/api.py` - Added `symbolValue` field extraction in `/api/positions` endpoint.
 
 ---
 
-*Last updated: 2026-03-10*
+## Known Cosmetic Issues (not yet fixed)
+
+| Issue | Location | Date noted | Notes |
+|-------|----------|------------|-------|
+| Recent Trades SIDE and QTY show dashes for invalid/rejected orders | Dashboard trades table | 2026-03-10 | **Correct behavior** - invalid orders never filled, so no side/qty data exists. Orders show red "Invalid" status badge appropriately. |
+
+---
+
+*Last updated: 2026-04-01*
