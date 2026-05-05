@@ -46,28 +46,34 @@ This file tracks all known differences between the documented/designed architect
 
 ## Strategy
 
-### Fully-qualified namespace required
-- **Date discovered:** Initial setup
-- **Reason:** LEAN resolves algorithm type by fully-qualified name.
-- **algorithm-type-name:** `PiAiTrader.Strategies.DualMomentumV2`
+### Algorithm-type-name and DLL naming
+- **Date discovered:** Initial setup / revised 2026-05-05
+- **Reason:** LEAN scans all DLLs in its working directory and resolves the algorithm
+  class by `algorithm-type-name` in `config.json`. The DLL filename does **not** need
+  to match any particular pattern — LEAN does not load by filename.
+- **algorithm-type-name:** `DualMomentumV2` (short class name, no namespace prefix needed
+  when only one class with that name exists in the loaded assemblies)
+- **algorithm-location:** `DualMomentumV2.dll`
+- **Note:** A previous entry (2026-03-10) incorrectly stated that LEAN "loads the DLL by
+  name". The actual crash at that time was caused by `algorithm-location` in `config.json`
+  referencing a file that no longer existed after the assembly was renamed. The fix was
+  to keep the assembly name consistent with whatever `algorithm-location` references.
 
-### Strategy DLL manually copied to LEAN Release directory
-- **Date discovered:** Initial setup
+### Automated deployment pipeline (added 2026-05-05)
+- **Replaces:** Manual `cp` + `systemctl restart` workflow
+- **Tools:** `Makefile` in project root + GitHub Actions (`.github/workflows/deploy.yml`)
 - **Deploy command:**
 ```bash
-  cp bin/Release/net10.0/PiAiTrader.Strategies.dll /opt/lean-engine/Launcher/bin/Release/
-  sudo systemctl restart lean-trader
+  make all        # build + deploy + verify in sequence
+  make build      # compile only → strategies/csharp/bin/Release/net10.0/DualMomentumV2.dll
+  make deploy     # copy DLL, verify config.json, restart lean-trader
+  make verify     # poll journal for "DualMomentumV2 Initialized" (up to 60s)
 ```
-
-### DLL assembly name is `PiAiTrader.Strategies`
-- **Date discovered:** 2026-03-10
-- **Reason:** Original `AssemblyName` in `.csproj` was `DualMomentumV2`, causing
-  `dotnet build` to produce `DualMomentumV2.dll`. LEAN loads the DLL by the name
-  `PiAiTrader.Strategies.dll` and resolves the algorithm class by fully-qualified
-  name. The mismatch caused an `Algorithm type name not found` crash on every startup.
-- **Change:** `<AssemblyName>PiAiTrader.Strategies</AssemblyName>` set in
-  `DualMomentumV2.csproj`. Build now produces `PiAiTrader.Strategies.dll` directly.
-  No rename needed on copy.
+- **GitHub Actions:** Pushes to `main` SSH into the Pi, pull latest code, run `make all`.
+  Requires `PI_SSH_KEY` GitHub Secret and passwordless sudo configured on Pi
+  (see Makefile header comment for exact sudoers rules).
+- **Health check:** `scripts/health_check.sh` runs daily via cron (see script header
+  for cron setup). Alerts written to `/var/log/pi-ai-trader/alerts.log`.
 
 **Deviation: Schedule.On() for Monthly Rebalancing**
 - **File:** `strategies/csharp/DualMomentumV2.cs`
@@ -120,4 +126,4 @@ The following cosmetic issues were resolved by updates to `web/templates/dashboa
 
 ---
 
-*Last updated: 2026-04-01*
+*Last updated: 2026-05-05*

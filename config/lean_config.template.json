@@ -33,14 +33,16 @@
   // Algorithm configuration
   // --------------------------------------------------------------------------
 
-  // The name of the algorithm class to run. Replace with your class name.
-  "algorithm-type-name": "<YOUR_ALGORITHM_CLASS_NAME>",
+  // The name of the algorithm class to run.
+  "algorithm-type-name": "DualMomentumV2",
 
   // Language: "CSharp" or "Python"
   "algorithm-language": "CSharp",
 
-  // Path to the algorithm file or compiled DLL.
-  "algorithm-location": "<PATH_TO_ALGORITHM>",
+  // Path to the compiled strategy DLL (relative to WorkingDirectory or absolute).
+  // LEAN's WorkingDirectory is /opt/lean-engine/Launcher/bin/Release/, so the
+  // filename alone is sufficient when the DLL is deployed there.
+  "algorithm-location": "DualMomentumV2.dll",
 
   // --------------------------------------------------------------------------
   // Live trading — Alpaca brokerage

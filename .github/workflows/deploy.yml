@@ -1,0 +1,76 @@
+# =============================================================================
+# deploy.yml — Build and Deploy DualMomentumV2 to Raspberry Pi
+# =============================================================================
+# Triggered on every push to main.
+#
+# Strategy: build and deploy run ON THE PI via SSH, not on the GitHub runner.
+# This avoids the LEAN DLL dependency problem — LEAN assemblies only exist at
+# /opt/lean-engine/Launcher/bin/Release/ on the Pi and are not on NuGet.
+#
+# Required GitHub Secrets (Settings → Secrets → Actions):
+#   PI_SSH_KEY   — private SSH key whose public key is in
+#                  pi-admin@192.168.1.231:~/.ssh/authorized_keys
+#
+# Required Pi sudoers setup (see Makefile header comment):
+#   /etc/sudoers.d/pi-admin-lean must allow passwordless sudo for:
+#     - cp DualMomentumV2.dll to /opt/lean-engine/Launcher/bin/Release/
+#     - systemctl restart lean-trader
+# =============================================================================
+
+name: Deploy Strategy to Pi
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Build → Deploy → Verify on Pi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Configure SSH access to the Pi
+      # -----------------------------------------------------------------------
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.PI_SSH_KEY }}" > ~/.ssh/pi_key
+          chmod 600 ~/.ssh/pi_key
+          ssh-keyscan -H 192.168.1.231 >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      # -----------------------------------------------------------------------
+      # 2. Pull latest code on the Pi and run the full make pipeline
+      #    make all = build + deploy + verify
+      # -----------------------------------------------------------------------
+      - name: Pull and deploy on Pi
+        run: |
+          ssh -i ~/.ssh/pi_key \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
+              pi-admin@192.168.1.231 \
+              "set -e
+               echo '--- git pull ---'
+               cd ~/Pi-AI-Trader
+               git fetch origin main
+               git checkout main
+               git reset --hard origin/main
+
+               echo '--- make all ---'
+               make all"
+
+      # -----------------------------------------------------------------------
+      # 3. Confirm service status (informational — does not gate the deploy)
+      # -----------------------------------------------------------------------
+      - name: Report service status
+        if: always()
+        run: |
+          ssh -i ~/.ssh/pi_key \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
+              pi-admin@192.168.1.231 \
+              "systemctl is-active lean-trader && \
+               echo 'lean-trader: ACTIVE' || \
+               echo 'lean-trader: NOT ACTIVE'" || true
