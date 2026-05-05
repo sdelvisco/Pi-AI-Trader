@@ -205,6 +205,41 @@ cp bin/Release/net10.0/DualMomentumV2.dll \
 sudo systemctl restart lean-trader
 ```
 
+### Fix a Broken config.json (JSONDecodeError from sed edits)
+
+If `make deploy` fails with `json.decoder.JSONDecodeError`, the LEAN config file has been
+corrupted by manual `sed` edits (duplicate keys, trailing commas, comment lines, etc.).
+Run the repair script on the Pi:
+
+```bash
+# SSH into the Pi
+ssh pi-admin@tradingpi.local
+cd ~/Pi-AI-Trader
+
+# Run the repair script (no root needed — reads/writes /opt/lean-engine/Launcher/)
+# If the file is owned by root, prefix with sudo:
+bash scripts/fix_lean_config.sh
+```
+
+The script will:
+1. Back up the broken file to `/opt/lean-engine/Launcher/config.json.broken-may5` (only once — won't overwrite an existing backup)
+2. Strip C-style comments and trailing commas
+3. Deduplicate keys (last value wins)
+4. Enforce `"algorithm-type-name": "DualMomentumV2"` and `"algorithm-location": "DualMomentumV2.dll"`
+5. Write valid, indented JSON back to `config.json`
+6. Validate the result with `python3 -m json.tool`
+
+After the script exits `[INFO] Done`, re-run `make deploy` as normal.
+
+**If the script reports `[ERROR] Still cannot parse JSON`**, the damage is too
+structural for automated repair. Restore from the template:
+
+```bash
+# Restore from the project template (you will need to re-enter credentials)
+sudo cp config/lean_config.template.json /opt/lean-engine/Launcher/config.json
+# Then re-set credentials manually or re-run setup/08_configure_lean.sh
+```
+
 ### Important Notes
 
 - **Algorithm namespace**: Must use full namespace `PiAiTrader.Strategies.DualMomentumV2` in config
