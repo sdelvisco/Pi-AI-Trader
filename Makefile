@@ -58,17 +58,17 @@ deploy:
 	@echo "==> Deploying $(DLL_NAME) to $(DEPLOY_DIR)..."
 	sudo cp "$(BUILD_OUTPUT)" "$(DEPLOY_DIR)/$(DLL_NAME)"
 	@echo "==> Verifying $(LEAN_CONFIG)..."
-	@python3 -c " \
-import json, sys; \
-cfg = json.load(open('$(LEAN_CONFIG)')); \
-atn = cfg.get('algorithm-type-name', ''); \
-al  = cfg.get('algorithm-location',  ''); \
-errs = []; \
-atn == 'DualMomentumV2' or errs.append('algorithm-type-name is \"' + atn + '\" — expected \"DualMomentumV2\"'); \
-'DualMomentumV2.dll' in al or errs.append('algorithm-location \"' + al + '\" does not reference DualMomentumV2.dll'); \
-[print('CONFIG ERROR: ' + e) for e in errs]; \
-sys.exit(len(errs)) \
-"
+	@printf '%s\n' \
+		'import json, sys' \
+		'cfg = json.load(open("$(LEAN_CONFIG)"))' \
+		'atn = cfg.get("algorithm-type-name", "")' \
+		'al  = cfg.get("algorithm-location",  "")' \
+		'errs = []' \
+		'if atn != "DualMomentumV2": errs.append("algorithm-type-name is " + repr(atn) + " -- expected \"DualMomentumV2\"")' \
+		'if "DualMomentumV2.dll" not in al: errs.append("algorithm-location " + repr(al) + " does not contain DualMomentumV2.dll")' \
+		'[print("CONFIG ERROR: " + e) for e in errs]' \
+		'sys.exit(len(errs))' \
+		| python3
 	@echo "Config OK"
 	@echo "==> Restarting $(SERVICE)..."
 	sudo systemctl restart $(SERVICE)
