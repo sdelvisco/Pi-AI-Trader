@@ -37,9 +37,13 @@ document.getElementById("btn-clear-log").addEventListener("click", function() {
     logOutput.textContent = "";
 });
 
+// Connect to SocketIO on the same origin with the default namespace ('/').
+// No explicit namespace argument — the server registers handlers on '/'.
 const socket = io();
+
 socket.on("log_line", function(data) {
-    const line = document.createTextNode(data.line + "\n");
+    // The server emits { data: "..." } — read the 'data' key, not 'line'.
+    const line = document.createTextNode(data.data + "\n");
     logOutput.appendChild(line);
 
     // Cap the log buffer at 2000 lines to prevent memory growth.
@@ -54,10 +58,16 @@ socket.on("log_line", function(data) {
 });
 
 socket.on("connect", () => {
-    logOutput.textContent = "[Connected to log stream]\n";
+    // Clear the "Waiting…" placeholder so the first real line is not appended
+    // after stale text.  The server will immediately emit "[Connected to log
+    // stream]" which will be the first line appended by the log_line handler.
+    logOutput.textContent = "";
 });
 socket.on("disconnect", () => {
     logOutput.textContent += "[Disconnected from log stream]\n";
+    if (autoScroll) {
+        logOutput.scrollTop = logOutput.scrollHeight;
+    }
 });
 </script>
 {% endblock %}
