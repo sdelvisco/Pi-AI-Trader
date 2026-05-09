@@ -1,12 +1,3 @@
-# eventlet monkey-patching must happen before all other imports so that the
-# standard-library networking primitives (socket, ssl, threading) are replaced
-# with eventlet-cooperative equivalents.  Gunicorn's eventlet worker relies on
-# this to hold WebSocket connections open; without it the sync worker closes
-# each connection after the HTTP handshake and every client falls back to
-# short-lived polling.
-import eventlet
-eventlet.monkey_patch()
-
 """
 app.py — Pi-AI-Trader Flask Web Interface
 =========================================
@@ -28,10 +19,10 @@ Security:
   - All sensitive config is read from environment variables, never hardcoded.
 
 Usage (development):
-  cd web && flask run --host=0.0.0.0 --port=5000
+  python3 -m web.app
 
 Usage (production via systemd):
-  Managed by lean-web.service using Gunicorn
+  Managed by lean-web.service using Flask-SocketIO's built-in server
 """
 
 import os
@@ -48,13 +39,7 @@ from flask_socketio import SocketIO
 # ---------------------------------------------------------------------------
 
 def create_app() -> Flask:
-    """
-    Create and configure the Flask application.
-
-    Using the application factory pattern allows the app to be created
-    with different configurations (testing, development, production) and
-    makes it easier to manage the app lifecycle in Gunicorn workers.
-    """
+    """Create and configure the Flask application."""
     app = Flask(__name__)
 
     # -----------------------------------------------------------------------
@@ -114,25 +99,15 @@ def _generate_warning_key() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Application and SocketIO instance (used by Gunicorn and the module)
+# Application and SocketIO instance
 # ---------------------------------------------------------------------------
 
 app = create_app()
 
-# SocketIO enables real-time WebSocket communication for live log streaming
-# and position updates without polling. Falls back to long-polling if
-# WebSockets are not available.
-#
-# async_mode="eventlet" tells Flask-SocketIO to use eventlet's cooperative
-# concurrency model, which allows Gunicorn's eventlet worker to hold WebSocket
-# upgrade connections open indefinitely.  The sync worker used with
-# async_mode="threading" closes connections after each request, forcing every
-# client to fall back to repeated short-lived polling sessions.
-#
-# Workers must stay at 1 (see lean-web.service).  Eventlet with multiple
-# workers still requires a shared message broker (Redis/RabbitMQ) to route
-# socket events across processes; without one, each new connection may land on
-# a worker that doesn't own the socket, causing an immediate disconnect.
+# Threading mode is correct here because we run Flask-SocketIO's built-in
+# server (not Gunicorn). The built-in server handles WebSocket upgrades
+# natively, and the single-worker threading model is sufficient for a
+# local-network single-user dashboard.
 #
 # cors_allowed_origins="*" is safe here: this dashboard is local-network-only
 # and UFW blocks external access, so wildcard CORS is equivalent to
@@ -140,7 +115,7 @@ app = create_app()
 # server is accessed by IP address (e.g. http://192.168.1.x:5000) rather than
 # hostname — Flask-SocketIO's internal check rejects the connection, causing
 # every browser client to see an immediate disconnect.
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 # Inject the SocketIO instance into the logs blueprint so it can register its
 # event handlers and run the background log-tail thread.  This call happens
@@ -151,15 +126,8 @@ _init_logs_socketio(socketio)
 
 
 # ---------------------------------------------------------------------------
-# Development server entry point
+# Entry point — run directly with: python3 -m web.app
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Run with SocketIO's development server (not Gunicorn) for local testing.
-    socketio.run(
-        app,
-        host="0.0.0.0",
-        port=5000,
-        debug=True,
-        use_reloader=True,
-    )
+    socketio.run(app, host="0.0.0.0", port=5000, debug=False, use_reloader=False)
