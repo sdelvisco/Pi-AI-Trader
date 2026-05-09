@@ -130,4 +130,6 @@ _init_logs_socketio(socketio)
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+    # Flask-SocketIO 5.x raises RuntimeError when using Werkzeug's dev server without this flag.
+    # Safe here: dashboard is local-network-only, UFW blocks external access, single concurrent user.
+    socketio.run(app, host="0.0.0.0", port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
