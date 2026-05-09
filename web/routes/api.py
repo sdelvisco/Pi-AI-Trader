@@ -21,7 +21,7 @@ import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 
-from flask import Blueprint, jsonify, current_app, request, abort
+from flask import Blueprint, jsonify, current_app, request, abort, send_file
 
 api_bp = Blueprint("api", __name__)
 
@@ -307,6 +307,26 @@ def health():
 
     metrics["timestamp"] = datetime.now(timezone.utc).isoformat()
     return jsonify(metrics)
+
+
+# ---------------------------------------------------------------------------
+# Log download endpoint
+# ---------------------------------------------------------------------------
+
+_LEAN_LOG_PATH = Path("/opt/lean-engine/Launcher/bin/Release/log.txt")
+
+
+@api_bp.route("/logs/download")
+def logs_download():
+    """Serve the raw LEAN log file as a downloadable attachment."""
+    try:
+        return send_file(
+            _LEAN_LOG_PATH,
+            as_attachment=True,
+            download_name="lean-log.txt",
+        )
+    except FileNotFoundError:
+        return jsonify({"error": "Log file not found — is lean-trader running?"}), 404
 
 
 # ---------------------------------------------------------------------------

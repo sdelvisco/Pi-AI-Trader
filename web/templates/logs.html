@@ -5,6 +5,9 @@
     <h5 class="mb-0"><i class="bi bi-terminal"></i> Live Logs</h5>
     <div class="d-flex gap-2">
         <button class="btn btn-sm btn-outline-secondary" id="btn-clear-log">Clear</button>
+        <!-- Navigating to /api/logs/download triggers a file download; the OS
+             opens the .txt file in the user's default text editor (e.g. Notepad). -->
+        <a class="btn btn-sm btn-outline-secondary" href="/api/logs/download">Download Full Log</a>
         <button class="btn btn-sm btn-outline-success" id="btn-auto-scroll">
             <i class="bi bi-arrow-down-circle"></i> Auto-scroll
         </button>
