@@ -20,16 +20,126 @@ fetch("/api/performance")
         if (!perf || Object.keys(perf).length === 0) return;
 
         const container = document.getElementById("performance-cards");
-        container.innerHTML = Object.entries(perf).map(([key, value]) => `
-            <div class="col-6 col-md-3">
-                <div class="card bg-black border-secondary">
-                    <div class="card-body">
-                        <div class="text-muted-light small">${key.replace(/([A-Z])/g, ' $1').trim()}</div>
-                        <div class="fs-6 fw-bold">${value}</div>
+        const cards = [];
+
+        // Runtime error alert (full-width, shown first)
+        const runtimeError = perf.state && perf.state.RuntimeError;
+        if (runtimeError) {
+            const stackTrace = perf.state.StackTrace;
+            const stackSection = stackTrace ? `
+                <div class="mt-2">
+                    <a class="text-danger small" data-bs-toggle="collapse" href="#stackTrace">Show stack trace</a>
+                    <div class="collapse mt-1" id="stackTrace">
+                        <pre class="text-danger small mb-0" style="white-space:pre-wrap;word-break:break-all;">${stackTrace}</pre>
                     </div>
-                </div>
-            </div>
-        `).join("");
+                </div>` : "";
+            cards.push(`
+                <div class="col-12">
+                    <div class="card bg-black border-danger">
+                        <div class="card-body">
+                            <div class="text-danger small fw-bold mb-1"><i class="bi bi-exclamation-triangle-fill"></i> Runtime Error</div>
+                            <div class="text-danger small">${runtimeError}</div>
+                            ${stackSection}
+                        </div>
+                    </div>
+                </div>`);
+        }
+
+        function metric(label, value, colorClass) {
+            const cls = colorClass ? ` ${colorClass}` : "";
+            return `
+                <div class="col-6 col-md-3">
+                    <div class="card bg-black border-secondary">
+                        <div class="card-body">
+                            <div class="text-muted-light small">${label}</div>
+                            <div class="fs-6 fw-bold${cls}">${value}</div>
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        function safeGet(obj, ...keys) {
+            return keys.reduce((o, k) => (o != null && o[k] != null ? o[k] : null), obj);
+        }
+
+        function fmtCurrency(amount, symbol) {
+            if (amount == null) return "N/A";
+            return `${symbol || ""}${parseFloat(amount).toFixed(2)}`;
+        }
+
+        function fmtPct(val) {
+            if (val == null) return "N/A";
+            return `${parseFloat(val).toFixed(1)}%`;
+        }
+
+        function latestChartValue(series) {
+            if (!series) return null;
+            const vals = series.values;
+            if (!vals || !vals.length) return null;
+            return vals[vals.length - 1][1];
+        }
+
+        function fmtDuration(start, end) {
+            if (!start || !end) return "N/A";
+            const ms = new Date(end) - new Date(start);
+            if (isNaN(ms)) return "N/A";
+            const s = Math.round(ms / 1000);
+            if (s < 60) return `${s} second${s !== 1 ? "s" : ""}`;
+            const m = Math.round(s / 60);
+            if (m < 60) return `${m} minute${m !== 1 ? "s" : ""}`;
+            const h = Math.round(m / 60);
+            return `${h} hour${h !== 1 ? "s" : ""}`;
+        }
+
+        // Account Currency
+        const currency = perf.accountCurrency || "N/A";
+        const symbol = perf.accountCurrencySymbol || "";
+        cards.push(metric("Account Currency", `${currency} ${symbol}`.trim()));
+
+        // Cash Balance
+        const cashAmount = safeGet(perf, "cash", "USD", "amount");
+        cards.push(metric("Cash Balance", fmtCurrency(cashAmount, symbol || "$")));
+
+        // Holdings Count
+        const holdingsCount = perf.holdings ? Object.keys(perf.holdings).length : 0;
+        cards.push(metric("Holdings", holdingsCount));
+
+        // Status
+        const status = safeGet(perf, "state", "Status") || "N/A";
+        const statusColor = status === "Running" ? "text-success"
+            : status === "RuntimeError" ? "text-danger"
+            : "text-warning";
+        cards.push(metric("Status", status, statusColor));
+
+        // Order Count
+        const orderCount = safeGet(perf, "state", "OrderCount") || "0";
+        cards.push(metric("Order Count", orderCount));
+
+        // Log Count
+        const logCount = safeGet(perf, "state", "LogCount");
+        cards.push(metric("Log Count", logCount != null ? logCount : "N/A"));
+
+        // Runtime Duration
+        const startTime = safeGet(perf, "state", "StartTime");
+        const endTime = safeGet(perf, "state", "EndTime");
+        cards.push(metric("Duration", fmtDuration(startTime, endTime)));
+
+        // Strategy Equity (latest value)
+        const equitySeries = safeGet(perf, "charts", "Strategy Equity", "series", "Equity");
+        const equityVal = latestChartValue(equitySeries);
+        cards.push(metric("Strategy Equity", equityVal != null ? fmtCurrency(equityVal, symbol || "$") : "N/A"));
+
+        // Return %
+        const returnSeries = safeGet(perf, "charts", "Strategy Equity", "series", "Return");
+        const returnVal = latestChartValue(returnSeries);
+        cards.push(metric("Return", returnVal != null ? fmtPct(returnVal) : "N/A"));
+
+        // Drawdown
+        const drawdownSeries = safeGet(perf, "charts", "Drawdown", "series", "Equity Drawdown");
+        const drawdownVal = latestChartValue(drawdownSeries);
+        cards.push(metric("Drawdown", drawdownVal != null ? fmtPct(drawdownVal) : "N/A"));
+
+        container.innerHTML = cards.join("");
     });
 </script>
 {% endblock %}
