@@ -1,3 +1,12 @@
+# eventlet monkey-patching must happen before all other imports so that the
+# standard-library networking primitives (socket, ssl, threading) are replaced
+# with eventlet-cooperative equivalents.  Gunicorn's eventlet worker relies on
+# this to hold WebSocket connections open; without it the sync worker closes
+# each connection after the HTTP handshake and every client falls back to
+# short-lived polling.
+import eventlet
+eventlet.monkey_patch()
+
 """
 app.py — Pi-AI-Trader Flask Web Interface
 =========================================
@@ -114,9 +123,16 @@ app = create_app()
 # and position updates without polling. Falls back to long-polling if
 # WebSockets are not available.
 #
-# async_mode="threading" requires a single Gunicorn worker (see lean-web.service).
-# Multiple workers without a Redis broker would split socket sessions across
-# processes, making every connection appear to immediately disconnect.
+# async_mode="eventlet" tells Flask-SocketIO to use eventlet's cooperative
+# concurrency model, which allows Gunicorn's eventlet worker to hold WebSocket
+# upgrade connections open indefinitely.  The sync worker used with
+# async_mode="threading" closes connections after each request, forcing every
+# client to fall back to repeated short-lived polling sessions.
+#
+# Workers must stay at 1 (see lean-web.service).  Eventlet with multiple
+# workers still requires a shared message broker (Redis/RabbitMQ) to route
+# socket events across processes; without one, each new connection may land on
+# a worker that doesn't own the socket, causing an immediate disconnect.
 #
 # cors_allowed_origins="*" is safe here: this dashboard is local-network-only
 # and UFW blocks external access, so wildcard CORS is equivalent to
@@ -124,7 +140,7 @@ app = create_app()
 # server is accessed by IP address (e.g. http://192.168.1.x:5000) rather than
 # hostname — Flask-SocketIO's internal check rejects the connection, causing
 # every browser client to see an immediate disconnect.
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 # Inject the SocketIO instance into the logs blueprint so it can register its
 # event handlers and run the background log-tail thread.  This call happens

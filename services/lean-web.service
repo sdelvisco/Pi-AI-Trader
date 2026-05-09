@@ -69,11 +69,18 @@ EnvironmentFile=-/etc/tradingpi/web.env
 Type=simple
 
 # Gunicorn serves the Flask app with:
-#   --workers 1     : MUST be 1 for Flask-SocketIO with async_mode="threading".
-#                     Multiple workers without a shared message broker (Redis/RabbitMQ)
-#                     split WebSocket sessions across processes — each new connection
-#                     may land on a different worker that doesn't own the socket,
-#                     causing the client to see an immediate disconnect.
+#   --worker-class eventlet : use eventlet's cooperative concurrency worker so
+#                     that Gunicorn can hold WebSocket upgrade connections open.
+#                     The default sync worker closes connections after each
+#                     request, forcing every SocketIO client to fall back to
+#                     repeated short-lived polling sessions instead of a
+#                     persistent WebSocket.
+#   --workers 1     : MUST remain 1 even with the eventlet worker. Eventlet
+#                     with multiple workers still requires a shared message
+#                     broker (Redis/RabbitMQ) to route socket events across
+#                     processes; without one, each new connection may land on a
+#                     worker that doesn't own the socket, causing an immediate
+#                     disconnect.
 #   --bind          : bind only to the Ethernet interface on port 5000
 #                     using eth0's IP (resolved at start via shell expansion)
 #   --timeout 120   : worker timeout in seconds
@@ -81,6 +88,7 @@ Type=simple
 #   --error-logfile -  : send error logs to stderr
 #   web.app:app     : the Flask application object in web/app.py
 ExecStart=/home/pi-admin/Pi-AI-Trader/venv/bin/gunicorn \
+    --worker-class eventlet \
     --workers 1 \
     --bind 0.0.0.0:5000 \
     --timeout 120 \
