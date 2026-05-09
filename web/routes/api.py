@@ -111,6 +111,10 @@ def positions():
     # Locate the LEAN live-state file.
     # Primary: look for the exact well-known filename in LEAN_RESULTS_DIR.
     # Fallback: glob for any JSON whose name contains the algorithm class.
+    #
+    # LEAN names output files using the algorithm's fully-qualified type name,
+    # including the namespace prefix.  The file is therefore named
+    # PiAiTrader.Strategies.DualMomentumV2.json, NOT DualMomentumV2.json.
     # -------------------------------------------------------------------
     algo_name   = "PiAiTrader.Strategies.DualMomentumV2"
     direct_path = results_dir / f"{algo_name}.json"

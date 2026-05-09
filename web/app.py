@@ -74,9 +74,13 @@ def create_app() -> Flask:
     # -----------------------------------------------------------------------
     from .routes.dashboard import dashboard_bp
     from .routes.api import api_bp
+    # logs_bp carries no HTTP routes itself — it provides the SocketIO event
+    # handlers and background tail thread for the live log streaming feature.
+    from .routes.logs import logs_bp
 
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(api_bp, url_prefix="/api")
+    app.register_blueprint(logs_bp)
 
     return app
 
@@ -109,7 +113,18 @@ app = create_app()
 # SocketIO enables real-time WebSocket communication for live log streaming
 # and position updates without polling. Falls back to long-polling if
 # WebSockets are not available.
+#
+# async_mode="threading" requires a single Gunicorn worker (see lean-web.service).
+# Multiple workers without a Redis broker would split socket sessions across
+# processes, making every connection appear to immediately disconnect.
 socketio = SocketIO(app, cors_allowed_origins="same-origin", async_mode="threading")
+
+# Inject the SocketIO instance into the logs blueprint so it can register its
+# event handlers and run the background log-tail thread.  This call happens
+# after socketio is constructed to avoid the circular import that would arise
+# if logs.py tried to import socketio from this module at load time.
+from .routes.logs import init_socketio as _init_logs_socketio  # noqa: E402
+_init_logs_socketio(socketio)
 
 
 # ---------------------------------------------------------------------------
