@@ -61,10 +61,11 @@ socket.on("log_line", function(data) {
 });
 
 socket.on("connect", () => {
-    // Clear the "Waiting…" placeholder so the first real line is not appended
-    // after stale text.  The server will immediately emit "[Connected to log
-    // stream]" which will be the first line appended by the log_line handler.
+    // Clear the "Waiting…" placeholder, then request history. Requesting
+    // history here (after all listeners are registered) guarantees the
+    // log_line handler is in place before the server emits any events.
     logOutput.textContent = "";
+    socket.emit("request_history");
 });
 socket.on("disconnect", () => {
     logOutput.textContent += "[Disconnected from log stream]\n";
