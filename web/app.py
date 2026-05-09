@@ -117,7 +117,14 @@ app = create_app()
 # async_mode="threading" requires a single Gunicorn worker (see lean-web.service).
 # Multiple workers without a Redis broker would split socket sessions across
 # processes, making every connection appear to immediately disconnect.
-socketio = SocketIO(app, cors_allowed_origins="same-origin", async_mode="threading")
+#
+# cors_allowed_origins="*" is safe here: this dashboard is local-network-only
+# and UFW blocks external access, so wildcard CORS is equivalent to
+# "same-origin" in practice.  The "same-origin" string is unreliable when the
+# server is accessed by IP address (e.g. http://192.168.1.x:5000) rather than
+# hostname — Flask-SocketIO's internal check rejects the connection, causing
+# every browser client to see an immediate disconnect.
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 # Inject the SocketIO instance into the logs blueprint so it can register its
 # event handlers and run the background log-tail thread.  This call happens
