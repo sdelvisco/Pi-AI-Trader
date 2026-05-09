@@ -128,7 +128,7 @@ def init_socketio(sio) -> None:
 
     @sio.on("connect")
     def on_connect():
-        """Start the tail thread on first connect; confirm the connection."""
+        """Start the tail thread on first connect; replay last 50 lines to caller."""
         global _thread
 
         # Guard with a lock so simultaneous connects don't spawn multiple threads.
@@ -142,6 +142,26 @@ def init_socketio(sio) -> None:
                 )
                 _thread.start()
                 logger.info("log-tailer thread started")
+
+        # Replay the last 50 lines to the connecting client only.
+        # We read the final 32 KB of the file — a fixed offset that covers ~50
+        # typical log lines with comfortable headroom.  True tail() would require
+        # scanning from EOF backward byte-by-byte; the 32 KB shortcut is a
+        # deliberate tradeoff: fast and simple, occasionally includes fewer lines
+        # for very long individual lines, but never stalls on huge files.
+        try:
+            with open(LEAN_LOG_PATH, "r", encoding="utf-8", errors="replace") as fh:
+                fh.seek(0, 2)
+                file_size = fh.tell()
+                fh.seek(max(0, file_size - 32 * 1024))
+                recent_lines = fh.readlines()[-50:]
+            for line in recent_lines:
+                _emit_to_caller("log_line", {"data": line.rstrip()})
+        except FileNotFoundError:
+            _emit_to_caller(
+                "log_line",
+                {"data": "[LEAN log file not found — is lean-trader running?]"},
+            )
 
         # Emit confirmation to the connecting client only (not broadcast).
         # flask_socketio.emit inside a handler context targets the current socket.
