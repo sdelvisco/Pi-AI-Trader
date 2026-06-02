@@ -290,6 +290,28 @@ namespace PiAiTrader.Strategies
                     }
                 }
             );
+
+            // Poll every minute during market hours for a manual rebalance trigger file.
+            // To trigger a rebalance on demand: touch /tmp/force_rebalance
+            // This is for testing only — remove or disable before production.
+            Schedule.On(
+                DateRules.EveryDay(),
+                TimeRules.Every(TimeSpan.FromMinutes(1)),
+                () =>
+                {
+                    // Only act during market hours to avoid submitting orders outside
+                    // the valid trading window.
+                    if (!IsMarketOpen("SPY")) return;
+
+                    if (File.Exists("/tmp/force_rebalance"))
+                    {
+                        Log("[Rebalance] Manual trigger detected via /tmp/force_rebalance");
+                        File.Delete("/tmp/force_rebalance");
+                        _lastRebalanceMonth = -1; // Reset so monthly schedule still fires next month
+                        Rebalance();
+                    }
+                }
+            );
         }
 
         // =====================================================================
@@ -306,17 +328,6 @@ namespace PiAiTrader.Strategies
         /// </summary>
         public override void OnData(Slice data)
         {
-            // Check for manual rebalance trigger file (testing only).
-            // To trigger: sudo touch /tmp/force_rebalance on the Pi.
-            if (File.Exists("/tmp/force_rebalance"))
-            {
-                Log("[Rebalance] Manual trigger detected via /tmp/force_rebalance");
-                File.Delete("/tmp/force_rebalance");
-                _lastRebalanceMonth = -1; // Reset so the scheduled rebalance still fires next month
-                Rebalance();
-                return;
-            }
-
             // ── 1. Update peak portfolio value ─────────────────────────────────
             // We use TotalPortfolioValue (cash + market value of all positions).
             var currentValue = Portfolio.TotalPortfolioValue;
