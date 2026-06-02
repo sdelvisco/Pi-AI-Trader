@@ -292,8 +292,7 @@ namespace PiAiTrader.Strategies
             );
 
             // Poll every minute during market hours for a manual rebalance trigger file.
-            // To trigger a rebalance on demand: touch /tmp/force_rebalance
-            // This is for testing only.
+            // To trigger: touch /tmp/force_rebalance on the Pi.
             Schedule.On(
                 DateRules.EveryDay(),
                 TimeRules.Every(TimeSpan.FromMinutes(1)),
