@@ -25,7 +25,7 @@ DEPLOY_DIR   := /opt/lean-engine/Launcher/bin/Release
 LEAN_CONFIG  := /opt/lean-engine/Launcher/config.json
 SERVICE      := lean-trader
 
-.PHONY: all build deploy verify
+.PHONY: all build deploy verify force-rebalance
 
 # -----------------------------------------------------------------------------
 # all: full pipeline — build → deploy → verify
@@ -57,15 +57,19 @@ build:
 deploy:
 	@echo "==> Deploying $(DLL_NAME) to $(DEPLOY_DIR)..."
 	sudo cp "$(BUILD_OUTPUT)" "$(DEPLOY_DIR)/$(DLL_NAME)"
+	@echo "==> Copying config template to $(LEAN_CONFIG)..."
+	sudo python3 -c "import json,sys; d=json.load(open('config/lean_config.template.json')); json.dump(d, open('/opt/lean-engine/Launcher/config.json','w'), indent=2)"
 	@echo "==> Verifying $(LEAN_CONFIG)..."
 	@printf '%s\n' \
 		'import json, sys' \
 		'cfg = json.load(open("$(LEAN_CONFIG)"))' \
 		'atn = cfg.get("algorithm-type-name", "")' \
 		'al  = cfg.get("algorithm-location",  "")' \
+		'lm  = cfg.get("live-mode", False)' \
 		'errs = []' \
 		'if atn != "DualMomentumV2": errs.append("algorithm-type-name is " + repr(atn) + " -- expected \"DualMomentumV2\"")' \
 		'if "DualMomentumV2.dll" not in al: errs.append("algorithm-location " + repr(al) + " does not contain DualMomentumV2.dll")' \
+		'if lm is not True: errs.append("live-mode is not true -- LEAN will backtest instead of live trade")' \
 		'[print("CONFIG ERROR: " + e) for e in errs]' \
 		'sys.exit(len(errs))' \
 		| python3
@@ -78,6 +82,14 @@ deploy:
 # verify: poll journal for "DualMomentumV2 Initialized" (up to 60s)
 # Exits 0 on success, 1 on timeout.
 # -----------------------------------------------------------------------------
+# force-rebalance: touch the trigger file on the Pi and tail the log
+# Use this to test rebalance execution without waiting for month-start.
+force-rebalance:
+	@echo "==> Triggering manual rebalance via /tmp/force_rebalance..."
+	touch /tmp/force_rebalance
+	@echo "==> Tailing LEAN log (Ctrl+C to stop)..."
+	tail -f /opt/lean-engine/Launcher/bin/Release/log.txt | grep --line-buffered -i "rebalanc\|order\|submit\|cancel\|fill\|error\|warn"
+
 verify:
 	@echo "==> Verifying LEAN startup (polls up to 60s)..."
 	@SECS=0; \
