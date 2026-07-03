@@ -15,7 +15,9 @@
 // Deployment notes:
 //   - SetStartDate / SetEndDate are intentionally omitted (paper trading).
 //   - SetCash(1000) is used only as an initial paper-trading seed.
-//   - All orders are market orders.
+//   - Monthly rebalance orders use MarketOnCloseOrder() (submitted at 3:45 PM ET,
+//     filled at that day's close); stop-loss, drawdown-halt, and force-rebalance
+//     test orders remain immediate MarketOrder()s.
 //
 // To compile:
 //   dotnet build strategies/csharp/DualMomentumV2.csproj -c Release
@@ -275,11 +277,11 @@ namespace PiAiTrader.Strategies
             Log($"Stop-loss         : {StopLossThreshold:P0} per position");
             Log($"Defensive asset   : {DefensiveTicker}");
 
-            // Schedule monthly rebalancing at 9:15 AM ET on the first trading day of each month.
-            // This ensures orders are submitted during the valid MarketOnOpen window (7:00-9:28).
+            // Schedule monthly rebalancing at 3:45 PM ET on the first trading day of each month.
+            // Orders are submitted via MarketOnCloseOrder() so they fill at that day's close.
             Schedule.On(
                 DateRules.MonthStart(Securities.Keys.First()),
-                TimeRules.At(9, 15),
+                TimeRules.At(15, 45),
                 () => {
                     // Safety guard against duplicate execution.
                     if (Time.Month != _lastRebalanceMonth)
@@ -293,6 +295,8 @@ namespace PiAiTrader.Strategies
 
             // Poll every minute during market hours for a manual rebalance trigger file.
             // To trigger: touch /tmp/force_rebalance on the Pi.
+            // Uses useMarketOrders: true so testing fires immediate fills instead of
+            // waiting for the MarketOnCloseOrder() used by the scheduled monthly rebalance.
             Schedule.On(
                 DateRules.EveryDay(),
                 TimeRules.Every(TimeSpan.FromMinutes(1)),
@@ -305,7 +309,7 @@ namespace PiAiTrader.Strategies
                         Log("[Rebalance] Manual trigger detected via /tmp/force_rebalance");
                         File.Delete("/tmp/force_rebalance");
                         _lastRebalanceMonth = -1;
-                        Rebalance();
+                        Rebalance(useMarketOrders: true);
                     }
                 }
             );
@@ -321,7 +325,7 @@ namespace PiAiTrader.Strategies
         ///   1. Updating the peak portfolio value tracker.
         ///   2. Checking per-position stop-losses.
         ///   3. Evaluating max-drawdown halt condition.
-        /// Note: Monthly rebalancing is now handled via Schedule.On() at 9:15 AM, not in OnData().
+        /// Note: Monthly rebalancing is now handled via Schedule.On() at 3:45 PM, not in OnData().
         /// </summary>
         public override void OnData(Slice data)
         {
@@ -370,7 +374,13 @@ namespace PiAiTrader.Strategies
         ///   C. Liquidate positions not in the new top-N.
         ///   D. Allocate PositionWeight to each of the top-N symbols.
         /// </summary>
-        private void Rebalance()
+        /// <param name="useMarketOrders">
+        /// When true, submit immediate MarketOrder()s instead of MarketOnCloseOrder()s.
+        /// Used by the manual force-rebalance trigger so testing doesn't have to wait
+        /// for the closing auction. The scheduled monthly rebalance leaves this false
+        /// so orders fill at the close via MarketOnCloseOrder().
+        /// </param>
+        private void Rebalance(bool useMarketOrders = false)
         {
             // ------------------------------------------------------------------
             // A. ABSOLUTE MOMENTUM FILTER
@@ -398,17 +408,24 @@ namespace PiAiTrader.Strategies
                 // ── Risk-off: go fully defensive ────────────────────────────────
                 Log("[Defensive] Moving 100% to AGG (absolute momentum filter: RISK-OFF).");
                 LiquidateAllExcept(DefensiveTicker);
-                // Use an explicit MarketOrder instead of SetHoldings() so that
-                // the Day TimeInForce on DefaultOrderProperties is respected and
-                // the order is not downgraded to a MarketOnOpen by the Alpaca
-                // brokerage model.
+                // Use an explicit MarketOrder/MarketOnCloseOrder instead of
+                // SetHoldings() so that the Day TimeInForce on
+                // DefaultOrderProperties is respected and the order is not
+                // downgraded to a MarketOnOpen by the Alpaca brokerage model.
+                // The scheduled monthly rebalance fires at 3:45 PM and submits
+                // MarketOnCloseOrder() so the fill happens at that day's close;
+                // the force-rebalance test trigger uses an immediate MarketOrder().
                 var defSym   = _symbols[DefensiveTicker];
                 var defPrice = Securities[defSym].Price;
                 if (defPrice > 0)
                 {
                     var targetQty = (long)(1.0m * Portfolio.TotalPortfolioValue / defPrice);
                     var delta     = targetQty - (long)Portfolio[defSym].Quantity;
-                    if (delta != 0) MarketOrder(defSym, (decimal)delta);
+                    if (delta != 0)
+                    {
+                        if (useMarketOrders) MarketOrder(defSym, (decimal)delta);
+                        else MarketOnCloseOrder(defSym, (decimal)delta);
+                    }
                 }
                 Log($"[Defensive] Target: 100% {DefensiveTicker}");
                 return;
@@ -457,16 +474,24 @@ namespace PiAiTrader.Strategies
             foreach (var ticker in topTickers)
             {
                 var sym = _symbols[ticker];
-                // Use an explicit MarketOrder instead of SetHoldings() so that
-                // the Day TimeInForce on DefaultOrderProperties is respected.
+                // Use an explicit MarketOrder/MarketOnCloseOrder instead of
+                // SetHoldings() so that the Day TimeInForce on
+                // DefaultOrderProperties is respected.
                 // Target quantity = PositionWeight × TotalPortfolioValue / Price.
                 // Subtract the current held quantity to get only the incremental
                 // order needed (mirrors what SetHoldings() does internally).
+                // The scheduled monthly rebalance submits MarketOnCloseOrder()
+                // (fills at the close); the force-rebalance test trigger uses
+                // an immediate MarketOrder() instead.
                 if (Securities.ContainsKey(sym) && Securities[sym].Price > 0)
                 {
                     var targetQty = (long)(PositionWeight * Portfolio.TotalPortfolioValue / Securities[sym].Price);
                     var delta     = targetQty - (long)Portfolio[sym].Quantity;
-                    if (delta != 0) MarketOrder(sym, (decimal)delta);
+                    if (delta != 0)
+                    {
+                        if (useMarketOrders) MarketOrder(sym, (decimal)delta);
+                        else MarketOnCloseOrder(sym, (decimal)delta);
+                    }
                     // Record the current price as the "entry price" for stop-loss tracking.
                     // (Will be refined by OnOrderEvent fill price — this is a best-effort
                     //  initialisation in case OnOrderEvent is delayed.)
