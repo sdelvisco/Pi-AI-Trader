@@ -295,6 +295,83 @@ This file tracks all known differences between the documented/designed architect
   as fixed and correct throughout — only the application config was
   changed.
 
+### Flat config never set `result-handler`/`setup-handler`/etc., so live-mode built a `LiveNodePacket` but ran it through backtesting handlers (`InvalidCastException`)
+- **Date discovered:** 2026-07-07
+- **Symptom:** With the `/lean`-path and `job-user-id` crashes fixed,
+  `lean-trader` got as far as loading `DualMomentumV2.dll` as the job, then
+  crashed with `System.InvalidCastException: Unable to cast object of type
+  'QuantConnect.Packets.LiveNodePacket' to type
+  'QuantConnect.Packets.BacktestNodePacket'`, thrown from
+  `BacktestingResultHandler.Initialize()` inside `Engine.Run()`.
+- **Investigation:** Read the current `QuantConnect/Lean` source directly
+  rather than guessing:
+  - `Queues/JobQueue.cs`'s `NextJob()` builds the job packet based on
+    `Globals.LiveMode`, which is set from this file's top-level
+    `"live-mode"` key — so with `live-mode: true` it correctly built a
+    `LiveNodePacket`.
+  - `Engine/LeanEngineAlgorithmHandlers.cs`'s `FromConfiguration()` resolves
+    each handler **independently**, each with its own hardcoded default,
+    none of which branch on `live-mode` at all:
+    `Config.Get("result-handler", "BacktestingResultHandler")`,
+    `Config.Get("setup-handler", "ConsoleSetupHandler")`,
+    `Config.Get("data-feed-handler", "FileSystemDataFeed")`,
+    `Config.Get("transaction-handler", "BacktestingTransactionHandler")`,
+    `Config.Get("real-time-handler", "BacktestingRealTimeHandler")`. With
+    none of these five keys present in the template, every handler
+    silently fell back to its backtesting variant regardless of
+    `live-mode`'s value — hence a live job packet run through a
+    backtesting result handler.
+  - Checked whether this is a LEAN regression: it is not. `git log
+    --follow -p` on `config/lean_config.template.json` shows these five
+    handler keys have **never** been present, back to the file's very
+    first commit (`c38b3b6`). A flat config here could never have
+    resolved live handlers correctly via LEAN's own defaults — whatever
+    produced this project's previously-reported live Alpaca fills must
+    have supplied these keys some other way (e.g. edited directly into
+    the deployed `config.json` on the Pi and never committed back to this
+    template, or a since-overwritten `config.json` that used LEAN's
+    `environments` structure). No relevant change to LEAN's own
+    config-resolution or handler-default code was found.
+  - Checked whether an `"environment"`/`"environments"` block is
+    structurally required for live-mode to resolve the right handlers: it
+    is not. `Configuration/Config.cs`'s `GetToken()` only looks inside
+    `settings.SelectToken("environments." + environment)` when an
+    `"environment"` key is set; with no such key, it falls straight
+    through to `settings.SelectToken(key)` on the flat top level. A
+    top-level key resolves identically to one merged in from a named
+    environment — so restructuring the template around `environments`
+    would have been a larger diff for no behavioral difference.
+- **Change:** Added five explicit top-level keys to
+  `config/lean_config.template.json`, copied verbatim from LEAN's own
+  bundled `Launcher/config.json` sample's `"live-alpaca"` environment
+  block: `"setup-handler":
+  "QuantConnect.Lean.Engine.Setup.BrokerageSetupHandler"`, `"result-handler":
+  "QuantConnect.Lean.Engine.Results.LiveTradingResultHandler"`,
+  `"data-feed-handler":
+  "QuantConnect.Lean.Engine.DataFeeds.LiveTradingDataFeed"`,
+  `"real-time-handler":
+  "QuantConnect.Lean.Engine.RealTime.LiveTradingRealTimeHandler"`, and
+  `"transaction-handler":
+  "QuantConnect.Lean.Engine.TransactionHandlers.BrokerageTransactionHandler"`.
+  The existing top-level Alpaca keys (`alpaca-access-token`,
+  `alpaca-secret-key`, `paper`, `live-mode-brokerage`,
+  `data-queue-handler`) did not need to move — they were already read
+  correctly at the flat top level and are unaffected by this fix.
+- **Comment format:** Documented via a `_comment_handler_resolution`
+  sibling JSON key, per the same constraint established in the
+  `job-user-id` fix — plain `//` comments break `make deploy`'s Python
+  `json.load` step.
+- **Impact:** This is the sixth distinct root cause found blocking
+  `lean-trader` startup today (after `pattern_day_trader` deserialization,
+  the `Python.Runtime` version conflict, the `config.json` wrong-directory
+  bug, the empty `job-user-id`, and the `/lean`-path/`data-provider`
+  crash) — all six traced back to the same unpinned `git reset --hard
+  origin/master` pull of LEAN done for the first time in months. Pinning
+  LEAN (and the Alpaca brokerage plugin) to specific commits/tags instead
+  of floating `origin/master` is now overdue as a follow-up, since an
+  unpinned pull is the common trigger across all six incidents found in a
+  single day.
+
 ---
 
 ## Strategy
