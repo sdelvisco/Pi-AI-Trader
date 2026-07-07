@@ -504,32 +504,105 @@ info "Alpaca plugin DLLs built: $ALPACA_DLL_COUNT file(s)"
 section "Copying Alpaca plugin DLLs into LEAN Release output"
 
 # LEAN discovers brokerage plugins by scanning its own output directory for
-# DLLs matching specific naming conventions. We copy all DLLs produced by the
+# DLLs matching specific naming conventions. We copy the DLLs produced by the
 # Alpaca plugin build into LEAN's Launcher/bin/Release/ directory so that LEAN
 # finds them automatically without any additional PATH or assembly-resolver
 # configuration.
 #
 # We copy rather than symlink because .NET's assembly loader may not follow
 # symlinks reliably across all runtime versions.
+#
+# --- WHY THIS IS NO LONGER AN UNCONDITIONAL COPY (2026-07-07 incident) -------
+# This step used to `cp -f` every DLL found under $ALPACA_RELEASE_DIR into
+# $LEAN_RELEASE_DIR unconditionally. That blindly overwrote shared third-party
+# dependencies that the Alpaca plugin happens to vendor in its own build
+# output (Python.Runtime.dll, Newtonsoft.Json.dll, NodaTime.dll,
+# CsvHelper.dll, MessagePack.dll, etc.) with whatever copies the Alpaca
+# plugin's build produced — even when Step 6 (LEAN's own build, which runs
+# BEFORE this step) had already placed a correct, authoritative copy of that
+# same dependency in $LEAN_RELEASE_DIR.
+#
+# Concretely: a fresh `git reset --hard origin/master` pull of LEAN compiled
+# against Python.Runtime 2.0.57.0 and placed it in $LEAN_RELEASE_DIR via
+# Step 6. This step then unconditionally clobbered it with the Alpaca
+# plugin's own vendored Python.Runtime.dll — version 2.0.53.0, dated
+# 2026-02-23, and NOT a NuGet package reference in the plugin's .csproj (i.e.
+# a stale binary checked into the plugin's own output, not something the
+# plugin's build system tracks or refreshes). QuantConnect.Algorithm.dll
+# (part of the fresh LEAN build) requires Python.Runtime 2.0.57.0, so the
+# downgrade caused DualMomentumV2.dll's subsequent `make all` build to fail
+# with CS1705 (assembly version mismatch).
+#
+# --- WHY AN EXISTENCE CHECK INSTEAD OF A HARDCODED ALLOWLIST -----------------
+# We deliberately do NOT maintain a hardcoded list of "Alpaca-only" DLL names
+# to skip-if-shared. The Alpaca plugin's own build output contains ~30+ DLLs,
+# and manually classifying each one as "genuinely Alpaca-specific" vs.
+# "shared/transitive dependency" is fragile and would need re-auditing every
+# time either repo's dependency graph changes. Instead, we trust that
+# whatever Step 6 (LEAN's own build) already placed in $LEAN_RELEASE_DIR is
+# authoritative for that filename, and only copy a DLL from the Alpaca
+# output if LEAN's build did not already provide one.
+#
+# --- ORDERING DEPENDENCY ------------------------------------------------------
+# This logic is only correct because Step 6 (LEAN's own build) runs BEFORE
+# this step and has already fully populated $LEAN_RELEASE_DIR by the time we
+# get here. If the steps are ever reordered so that this copy runs before
+# LEAN's own build, the existence check below becomes meaningless (nothing
+# will exist yet to skip against) and every shared dependency will silently
+# fall back to the Alpaca plugin's vendored copy again. Do not reorder Steps
+# 6 and 8 without revisiting this logic.
+#
+# --- THE TWO FORCED EXCEPTIONS -----------------------------------------------
+# Alpaca.Markets.dll and QuantConnect.Brokerages.Alpaca.dll are always
+# force-overwritten regardless of whether LEAN's build happens to have
+# produced a same-named file, because these two assemblies ARE the actual
+# deliverable of this step — the whole point of Step 8 is to deliver a fresh
+# build of the Alpaca brokerage plugin, not to leave stale copies in place.
+FORCE_OVERWRITE_DLLS=("Alpaca.Markets.dll" "QuantConnect.Brokerages.Alpaca.dll")
 
 info "Source: $ALPACA_RELEASE_DIR"
 info "Destination: $LEAN_RELEASE_DIR"
 
-# Find all DLLs in the Alpaca plugin Release output tree and copy them.
+# Walk every DLL produced by the Alpaca plugin build and decide, per file,
+# whether to force-overwrite, copy (because it's genuinely new), or skip
+# (because LEAN's own build already provided an authoritative copy).
+FORCED=0
 COPIED=0
+SKIPPED=0
+TOTAL_FOUND=0
 while IFS= read -r -d '' DLL_FILE; do
     DLL_BASENAME="$(basename "$DLL_FILE")"
-    cp -f "$DLL_FILE" "${LEAN_RELEASE_DIR}/${DLL_BASENAME}" \
-        || die "Failed to copy $DLL_FILE → $LEAN_RELEASE_DIR"
-    info "  Copied: $DLL_BASENAME"
-    (( COPIED++ )) || true
+    (( TOTAL_FOUND++ )) || true
+
+    IS_FORCED=0
+    for FORCE_NAME in "${FORCE_OVERWRITE_DLLS[@]}"; do
+        if [[ "$DLL_BASENAME" == "$FORCE_NAME" ]]; then
+            IS_FORCED=1
+            break
+        fi
+    done
+
+    if [[ "$IS_FORCED" -eq 1 ]]; then
+        cp -f "$DLL_FILE" "${LEAN_RELEASE_DIR}/${DLL_BASENAME}" \
+            || die "Failed to copy $DLL_FILE → $LEAN_RELEASE_DIR"
+        info "  Force-overwrote (Alpaca deliverable): $DLL_BASENAME"
+        (( FORCED++ )) || true
+    elif [[ ! -e "${LEAN_RELEASE_DIR}/${DLL_BASENAME}" ]]; then
+        cp -f "$DLL_FILE" "${LEAN_RELEASE_DIR}/${DLL_BASENAME}" \
+            || die "Failed to copy $DLL_FILE → $LEAN_RELEASE_DIR"
+        info "  Copied (not present in LEAN build): $DLL_BASENAME"
+        (( COPIED++ )) || true
+    else
+        info "  Skipped (already provided by LEAN's own build): $DLL_BASENAME"
+        (( SKIPPED++ )) || true
+    fi
 done < <(find "$ALPACA_RELEASE_DIR" -maxdepth 2 -name '*.dll' -print0 2>/dev/null)
 
-if [[ $COPIED -eq 0 ]]; then
+if [[ $TOTAL_FOUND -eq 0 ]]; then
     die "No DLLs found in $ALPACA_RELEASE_DIR — verify the Alpaca build succeeded"
 fi
 
-info "$COPIED DLL(s) copied into LEAN Release directory."
+info "Summary: $FORCED force-overwritten (Alpaca deliverable), $COPIED copied (new), $SKIPPED skipped (already provided by LEAN build)."
 
 # -----------------------------------------------------------------------------
 # Step 9: Set ownership of build directories
