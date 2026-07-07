@@ -15,13 +15,15 @@
 #   2. Clones QuantConnect/Lean.Brokerages.Alpaca → /opt/lean-alpaca
 #   3. Patches AlpacaBrokerage.cs to comment out ValidateSubscription()
 #      (this call fails for free QuantConnect accounts at runtime)
-#   4. Creates symlink /opt/Lean → /opt/lean-engine to satisfy the Alpaca
+#   4. Patches AlpacaBrokerage.cs to bypass GetAccountAsync() in GetCashBalance()
+#      (the vendored SDK requires the now-removed pattern_day_trader field)
+#   5. Creates symlink /opt/Lean → /opt/lean-engine to satisfy the Alpaca
 #      plugin's hardcoded relative path reference to ../../Lean/
-#   5. Builds LEAN in Release configuration
-#   6. Builds the Alpaca plugin in Release configuration
-#   7. Copies Alpaca plugin DLLs into LEAN's Release output directory
+#   6. Builds LEAN in Release configuration
+#   7. Builds the Alpaca plugin in Release configuration
+#   8. Copies Alpaca plugin DLLs into LEAN's Release output directory
 #      so LEAN can discover the brokerage plugin at runtime
-#   8. Sets /opt/lean-engine and /opt/lean-alpaca ownership to pi-admin
+#   9. Sets /opt/lean-engine and /opt/lean-alpaca ownership to pi-admin
 #
 # WARNING: Both builds are computationally intensive. On Raspberry Pi 4
 # hardware, each build may take 30–60 minutes. Do not interrupt the script
@@ -258,7 +260,168 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 4: Create /opt/Lean symlink for Alpaca plugin's hardcoded path
+# Step 4: Patch AlpacaBrokerage.cs — bypass GetAccountAsync() in GetCashBalance()
+# -----------------------------------------------------------------------------
+section "Patching AlpacaBrokerage.cs — pattern_day_trader deserialization workaround"
+
+# Alpaca deprecated the `pattern_day_trader` field on the GET /v2/account response
+# ahead of FINRA's new Intraday Margin Standards (effective before 2026-06-04),
+# which replaced the old PDT flag. Alpaca no longer sends that field at all, but
+# the vendored Alpaca.Markets.dll (built from alpacahq/alpaca-trade-api-csharp,
+# tag sdk-8.0.0-beta4 — the newest release available; there is no newer SDK to
+# upgrade to) deserializes the account response with a strict model that requires
+# `pattern_day_trader` to be present. Every call to _tradingClient.GetAccountAsync()
+# now throws "Required property 'pattern_day_trader' not found in JSON.", which
+# happens inside AlpacaBrokerage.GetCashBalance() during LEAN's
+# BrokerageSetupHandler.Setup() — so the engine crashed on every single restart.
+#
+# We do not patch or rebuild Alpaca.Markets.dll. Instead we patch the plugin's
+# GetCashBalance() to bypass the SDK client entirely for this one call: a manual
+# authenticated HTTP GET straight to Alpaca's REST account endpoint, parsing only
+# "cash" and "currency" with Newtonsoft.Json (already used elsewhere in this file
+# for ValidateSubscription's license parsing). This mirrors the ValidateSubscription
+# patch above: applied via Python string replacement (not a diff/patch file, since
+# the source is re-cloned fresh from upstream on every provisioning run and never
+# committed to this repo), and is idempotent — checked via a marker comment before
+# reapplying.
+#
+# This is a permanent workaround for a deprecated/removed Alpaca field, not a
+# temporary fix pending an SDK update.
+
+PDT_WORKAROUND_MARKER="pattern_day_trader workaround"
+
+if grep -q "$PDT_WORKAROUND_MARKER" "$ALPACA_BROKERAGE_CS"; then
+    info "pattern_day_trader workaround already applied — skipping patch"
+else
+    info "Applying pattern_day_trader workaround to AlpacaBrokerage.cs"
+
+    if ! python3 - "$ALPACA_BROKERAGE_CS" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    src = f.read()
+
+# --- Patch A: add private fields for the manual account-endpoint HTTP call ---
+old_fields = "        private IAlpacaTradingClient _tradingClient;\n"
+new_fields = old_fields + (
+    "\n"
+    "        // --- Alpaca account-endpoint pattern_day_trader workaround (see GetCashBalance()) ---\n"
+    "        // Alpaca stopped returning `pattern_day_trader` in GET /v2/account responses\n"
+    "        // (FINRA Intraday Margin Standards, effective before 2026-06-04). The vendored\n"
+    "        // Alpaca.Markets.dll (sdk-8.0.0-beta4) requires that field, so _tradingClient.\n"
+    "        // GetAccountAsync() throws. We fetch cash/currency with a manual authenticated\n"
+    "        // HTTP GET instead. These fields are populated once in Initialize().\n"
+    "        private string _accountBaseUrl;\n"
+    "        private Dictionary<string, string> _accountAuthHeaders;\n"
+    "        private HttpClient _accountHttpClient;\n"
+)
+assert old_fields in src and src.count(old_fields) == 1, "field anchor not found/unique"
+src = src.replace(old_fields, new_fields, 1)
+
+# --- Patch B: compute base URL + auth headers once in Initialize() ---
+old_env = "            var environment = isPaperTrading ? Environments.Paper : Environments.Live;\n"
+new_env = old_env + (
+    "\n"
+    "            // pattern_day_trader workaround (2026-06-04): Alpaca removed `pattern_day_trader`\n"
+    "            // from the account endpoint response; the vendored SDK's strict deserialization\n"
+    "            // model requires it, so GetAccountAsync() now throws. Set up a direct HTTP path to\n"
+    "            // the account endpoint here so GetCashBalance() can bypass the SDK client entirely.\n"
+    "            // This is a permanent workaround -- there is no newer SDK release to pick up a fix.\n"
+    "            _accountBaseUrl = isPaperTrading ? \"https://paper-api.alpaca.markets\" : \"https://api.alpaca.markets\";\n"
+    "            _accountHttpClient = new HttpClient();\n"
+    "            _accountAuthHeaders = new Dictionary<string, string>();\n"
+    "            if (tradingSecretKey != null)\n"
+    "            {\n"
+    "                // OAuth access token path -- mirrors the tradingSecretKey ?? secretKey precedence\n"
+    "                // used for the SDK clients below.\n"
+    "                _accountAuthHeaders[\"Authorization\"] = $\"Bearer {accessToken}\";\n"
+    "            }\n"
+    "            else\n"
+    "            {\n"
+    "                _accountAuthHeaders[\"APCA-API-KEY-ID\"] = apiKey;\n"
+    "                _accountAuthHeaders[\"APCA-API-SECRET-KEY\"] = apiKeySecret;\n"
+    "            }\n"
+)
+assert old_env in src and src.count(old_env) == 1, "Initialize() anchor not found/unique"
+src = src.replace(old_env, new_env, 1)
+
+# --- Patch C: dispose the new HttpClient alongside the other clients ---
+old_dispose = "            _tradingClient.DisposeSafely();\n"
+new_dispose = old_dispose + "            _accountHttpClient?.Dispose();\n"
+assert old_dispose in src and src.count(old_dispose) == 1, "Dispose() anchor not found/unique"
+src = src.replace(old_dispose, new_dispose, 1)
+
+# --- Patch D: rewrite GetCashBalance() to bypass GetAccountAsync() ---
+old_get_cash_balance = '''        public override List<CashAmount> GetCashBalance()
+        {
+            var accounts = _tradingClient.GetAccountAsync().SynchronouslyAwaitTaskResult();
+            var balances = new List<CashAmount>() { new(accounts.TradableCash, accounts.Currency) };
+'''
+new_get_cash_balance = '''        public override List<CashAmount> GetCashBalance()
+        {
+            // pattern_day_trader workaround (2026-06-04): Alpaca deprecated the `pattern_day_trader`
+            // field on the GET /v2/account response ahead of FINRA's new Intraday Margin Standards,
+            // which replaced the old PDT flag. The vendored Alpaca.Markets.dll (sdk-8.0.0-beta4, the
+            // newest release published at the time of writing) deserializes the account response
+            // with a strict model requiring `pattern_day_trader` to be present, so
+            // _tradingClient.GetAccountAsync() now throws:
+            //   "Required property 'pattern_day_trader' not found in JSON."
+            // on every call -- and GetCashBalance() runs during LEAN's
+            // BrokerageSetupHandler.Setup(), so this crashed the engine on every restart. There is
+            // no newer SDK release to pick up an upstream fix, so this is a permanent workaround,
+            // not a stopgap: bypass the SDK's account deserialization here entirely and make a
+            // manual authenticated HTTP GET to Alpaca's REST account endpoint, parsing only the
+            // "cash" and "currency" fields we actually need with Newtonsoft.Json (already used
+            // elsewhere in this file for ValidateSubscription's license parsing).
+            using var accountRequest = new HttpRequestMessage(HttpMethod.Get, $"{_accountBaseUrl}/v2/account");
+            foreach (var header in _accountAuthHeaders)
+            {
+                accountRequest.Headers.TryAddWithoutValidation(header.Key, header.Value);
+            }
+
+            var accountResponse = _accountHttpClient.SendAsync(accountRequest).SynchronouslyAwaitTaskResult();
+            var accountResponseBody = accountResponse.Content.ReadAsStringAsync().SynchronouslyAwaitTaskResult();
+            if (!accountResponse.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException($"{nameof(AlpacaBrokerage)}.{nameof(GetCashBalance)}: Alpaca account endpoint returned {(int)accountResponse.StatusCode} {accountResponse.StatusCode}: {accountResponseBody}");
+            }
+
+            var accountJson = JObject.Parse(accountResponseBody);
+            var cashToken = accountJson["cash"];
+            var currencyToken = accountJson["currency"];
+            if (cashToken == null || currencyToken == null)
+            {
+                throw new InvalidOperationException($"{nameof(AlpacaBrokerage)}.{nameof(GetCashBalance)}: Alpaca account endpoint response is missing 'cash' or 'currency': {accountResponseBody}");
+            }
+
+            var balances = new List<CashAmount>() { new(cashToken.Value<decimal>(), currencyToken.Value<string>()) };
+'''
+assert old_get_cash_balance in src, "GetCashBalance() anchor not found"
+assert src.count(old_get_cash_balance) == 1, "GetCashBalance() anchor not unique"
+src = src.replace(old_get_cash_balance, new_get_cash_balance, 1)
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write(src)
+
+print("AlpacaBrokerage.cs patched: pattern_day_trader workaround applied.")
+PYEOF
+    then
+        die "pattern_day_trader workaround patch failed on $ALPACA_BROKERAGE_CS"
+    fi
+
+    info "pattern_day_trader workaround applied successfully."
+fi
+
+# Confirm the patch took effect.
+if grep -q "$PDT_WORKAROUND_MARKER" "$ALPACA_BROKERAGE_CS"; then
+    info "Patch verification — pattern_day_trader workaround marker found in file."
+else
+    die "pattern_day_trader workaround marker not found after patching — patch may have failed silently"
+fi
+
+# -----------------------------------------------------------------------------
+# Step 5: Create /opt/Lean symlink for Alpaca plugin's hardcoded path
 # -----------------------------------------------------------------------------
 section "Creating /opt/Lean symlink for Alpaca plugin"
 
@@ -277,7 +440,7 @@ ln -sfn /opt/lean-engine /opt/Lean \
 info "Symlink created: /opt/Lean → $(readlink /opt/Lean)"
 
 # -----------------------------------------------------------------------------
-# Step 5: Build LEAN engine in Release configuration
+# Step 6: Build LEAN engine in Release configuration
 # -----------------------------------------------------------------------------
 section "Building LEAN engine (Release) — this will take a long time"
 
@@ -302,7 +465,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Step 6: Build Alpaca brokerage plugin in Release configuration
+# Step 7: Build Alpaca brokerage plugin in Release configuration
 # -----------------------------------------------------------------------------
 section "Building Alpaca brokerage plugin (Release) — this will take a long time"
 
@@ -336,7 +499,7 @@ fi
 info "Alpaca plugin DLLs built: $ALPACA_DLL_COUNT file(s)"
 
 # -----------------------------------------------------------------------------
-# Step 7: Copy Alpaca plugin DLLs into LEAN's Release output directory
+# Step 8: Copy Alpaca plugin DLLs into LEAN's Release output directory
 # -----------------------------------------------------------------------------
 section "Copying Alpaca plugin DLLs into LEAN Release output"
 
@@ -369,7 +532,7 @@ fi
 info "$COPIED DLL(s) copied into LEAN Release directory."
 
 # -----------------------------------------------------------------------------
-# Step 8: Set ownership of build directories
+# Step 9: Set ownership of build directories
 # -----------------------------------------------------------------------------
 section "Setting ownership of build directories"
 

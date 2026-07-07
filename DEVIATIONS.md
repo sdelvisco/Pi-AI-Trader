@@ -27,6 +27,39 @@ This file tracks all known differences between the documented/designed architect
 - **Change:** `ValidateSubscription()` call commented out in the Alpaca plugin source.
   Must be re-applied after any LEAN engine update.
 
+### Alpaca brokerage plugin — GetCashBalance() bypasses GetAccountAsync()
+- **Date discovered:** 2026-07-07
+- **Reason:** Alpaca deprecated the `pattern_day_trader` field on the
+  `GET /v2/account` response ahead of FINRA's new Intraday Margin Standards
+  (effective before 2026-06-04), which replaced the old PDT flag. Alpaca no
+  longer sends that field at all, but the vendored `Alpaca.Markets.dll` (built
+  from `alpacahq/alpaca-trade-api-csharp`, tag `sdk-8.0.0-beta4` — the newest
+  release available; there is no newer SDK version to update to) deserializes
+  the account response with a strict model that requires `pattern_day_trader`
+  to be present. Every call to `_tradingClient.GetAccountAsync()` therefore
+  threw `Required property 'pattern_day_trader' not found in JSON.` — this
+  happens inside `AlpacaBrokerage.GetCashBalance()`, which runs during LEAN's
+  `BrokerageSetupHandler.Setup()` at algorithm startup, so the engine crashed
+  on every single restart.
+- **Change:** `GetCashBalance()` in `AlpacaBrokerage.cs` no longer calls
+  `_tradingClient.GetAccountAsync()`. Instead it makes a manual authenticated
+  HTTP GET directly to Alpaca's REST account endpoint
+  (`https://paper-api.alpaca.markets/v2/account` or
+  `https://api.alpaca.markets/v2/account`, matching `isPaperTrading`) and
+  parses only the `cash` and `currency` fields with `Newtonsoft.Json`,
+  bypassing the SDK's strict deserialization entirely. `Alpaca.Markets.dll`
+  itself is not modified or rebuilt.
+- **Impact:** No known upstream fix as of this writing. This is a permanent
+  workaround for a deprecated/removed Alpaca field, not a temporary fix
+  pending an SDK update — there is no newer SDK release to move to.
+- **Patch mechanism:** Applied by `setup/06_lean_build.sh` (Step 4) via the
+  same approach as the `ValidateSubscription()` patch above: a Python
+  string-replacement patch run against the freshly cloned
+  `AlpacaBrokerage.cs`, idempotent (skipped on re-run if already applied), and
+  never committed upstream — it lives only in `/opt/lean-alpaca` and must be
+  re-applied (automatically, by re-running `06_lean_build.sh`) after any LEAN
+  Alpaca plugin update.
+
 ### No Docker
 - **Date discovered:** Initial setup
 - **Reason:** Running natively on Raspberry Pi OS. Docker not used.
@@ -126,4 +159,4 @@ The following cosmetic issues were resolved by updates to `web/templates/dashboa
 
 ---
 
-*Last updated: 2026-05-05*
+*Last updated: 2026-07-07*
