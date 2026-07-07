@@ -218,6 +218,83 @@ This file tracks all known differences between the documented/designed architect
   still crashing before any of those three could even be exercised, since
   this failure happens before the algorithm or brokerage ever loads.
 
+### `/lean` paths crashed LEAN under `ProtectSystem=strict` (`IOException: Read-only file system`), plus an invalid `data-provider`
+- **Date discovered:** 2026-07-07
+- **Reason:** `lean-trader.service` runs with `ProtectSystem=strict` and only
+  two `ReadWritePaths`: `/opt/lean-engine/Launcher/bin/Release` and `/tmp`.
+  Every other path is read-only to the service. `config/lean_config.template.json`
+  had `data-folder`, `results-destination-folder`, and `transaction-log` all
+  pointing under `/lean`, which has never existed anywhere on this
+  filesystem (confirmed: `stat /lean` → "No such file or directory", not a
+  mount point). `Engine/Initializer.cs:45` (`Initializer.Start()`)
+  unconditionally calls `Directory.CreateDirectory(Globals.ResultsDestinationFolder)`
+  on every startup, which threw `System.IO.IOException: Read-only file
+  system : '/lean'` and crashed the service before the algorithm or
+  brokerage ever loaded. This had been silently masked for months by the
+  empty-`job-user-id` crash (previous entry above) — that crash happened
+  earlier in the same startup sequence (in `Globals`'s static constructor,
+  before `Initializer.Start()` even runs), so LEAN never got far enough to
+  attempt the `/lean` write until that was fixed. This is very likely the
+  explanation for a previously-unexplained project symptom: results were
+  observed writing to `/opt/lean-engine/Launcher/bin/Release/` instead of
+  the intended `lean/Results` path — `Globals.ResultsDestinationFolder`
+  falls back to `Directory.GetCurrentDirectory()` (== `bin/Release`, the
+  systemd `WorkingDirectory`) whenever the configured value can't be used
+  as intended.
+- **Change:** `results-destination-folder` and `transaction-log` changed to
+  relative paths (`"Results"` and `"Results/transaction-log.json"`).
+  Confirmed in LEAN source that relative paths here resolve against the
+  process's current working directory (`Directory.CreateDirectory` in
+  `Initializer.Start()`; the file write in `Engine.SaveListOfTrades()`),
+  which for this systemd unit equals `WorkingDirectory=/opt/lean-engine/Launcher/bin/Release`
+  — the one writable path — so no `ReadWritePaths` change was needed.
+- **Second finding (not part of the original bug report, found during the
+  required investigation of `data-folder`):** `"data-provider": "QuantConnectDataProvider"`
+  is not a real LEAN type. Cloned `QuantConnect/Lean` at current
+  `origin/master` and grepped `Engine/DataFeeds/`: the only `IDataProvider`
+  implementations are `DefaultDataProvider`, `ApiDataProvider`,
+  `DownloaderDataProvider`, and `CompositeDataProvider`.
+  `Composer.GetExportedValueByTypeName<IDataProvider>()` matches only exact
+  `AssemblyQualifiedName`/`FullName`/`Name` (`Extensions.MatchesTypeName`),
+  so this would have thrown `Unable to locate any exports matching the
+  requested typeName: QuantConnectDataProvider` in
+  `LeanEngineAlgorithmHandlers.InitializeAuxiliaryDataProviders()` — i.e.
+  fixing only the `/lean` paths would have traded one startup crash for
+  another on the very next run. `ApiDataProvider` (LEAN's actual
+  QuantConnect-Cloud-backed provider — its constructor throws unless
+  `organization.DataAgreement.Signed`) requires a paid, terms-accepted QC
+  account, which this project deliberately avoids (see "LEAN built from
+  source (not CLI)" above). Changed `data-provider` to `DefaultDataProvider`
+  — the same value LEAN's own bundled `Launcher/config.json` sample uses —
+  which reads only from local disk under `data-folder`, touches no network,
+  and needs no account.
+- **`data-folder` change:** `DefaultDataProvider` requires files to already
+  exist locally; it does not fetch anything. `setup/06_lean_build.sh` does a
+  full (non-sparse) `git clone` of `QuantConnect/Lean` into
+  `/opt/lean-engine`, which includes the repo's own bundled sample `Data/`
+  directory (confirmed present in a fresh clone: 1,141 files across
+  equity/forex/crypto/etc., and no step in `06_lean_build.sh` deletes or
+  excludes it afterward). `data-folder` now points at
+  `/opt/lean-engine/Data` — read-only under `ProtectSystem=strict`, which is
+  fine since `DefaultDataProvider` only ever reads, never writes. **Caveat:**
+  this is LEAN's own generic demo dataset, not verified to contain complete
+  history for every symbol `DualMomentumV2` actually trades.
+  `DefaultDataProvider.Fetch()` returns `null` on a missing file rather than
+  crashing, so this won't reproduce the read-only-filesystem crash, but
+  historical-data completeness for the live symbols is a separate,
+  unaddressed question outside the scope of this fix.
+- **Comment format:** Documented all of the above via `_comment_paths` and
+  `_comment_data_provider` sibling JSON keys, per the same constraint
+  established in the `job-user-id` fix — plain `//` comments break `make
+  deploy`'s Python `json.load` step.
+- **Impact:** This is the fifth distinct root cause found blocking
+  `lean-trader` startup today (after `pattern_day_trader` deserialization,
+  the `Python.Runtime` version conflict, the `config.json` wrong-directory
+  bug, and the empty `job-user-id`). Per the project's own decision, the
+  systemd sandboxing (`ProtectSystem=strict` / `ReadWritePaths`) was treated
+  as fixed and correct throughout — only the application config was
+  changed.
+
 ---
 
 ## Strategy
