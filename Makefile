@@ -22,7 +22,14 @@ DLL_NAME     := DualMomentumV2.dll
 BUILD_DIR    := $(STRATEGY_DIR)/bin/Release/net10.0
 BUILD_OUTPUT := $(BUILD_DIR)/$(DLL_NAME)
 DEPLOY_DIR   := /opt/lean-engine/Launcher/bin/Release
-LEAN_CONFIG  := /opt/lean-engine/Launcher/config.json
+# LEAN reads config.json from the same directory as its own executable, not
+# from Launcher/ one level up: WorkingDirectory and ExecStart in
+# /etc/systemd/system/lean-trader.service both point at
+# Launcher/bin/Release/QuantConnect.Lean.Launcher.dll. A config.json written
+# to Launcher/config.json is never read by the running service — it silently
+# falls back to whatever config.json already happens to be sitting in
+# bin/Release/ (e.g. LEAN's own bundled sample config after a rebuild).
+LEAN_CONFIG  := /opt/lean-engine/Launcher/bin/Release/config.json
 SERVICE      := lean-trader
 
 .PHONY: all build deploy verify force-rebalance
@@ -58,7 +65,7 @@ deploy:
 	@echo "==> Deploying $(DLL_NAME) to $(DEPLOY_DIR)..."
 	sudo cp "$(BUILD_OUTPUT)" "$(DEPLOY_DIR)/$(DLL_NAME)"
 	@echo "==> Copying config template to $(LEAN_CONFIG)..."
-	sudo python3 -c "import json,sys; d=json.load(open('config/lean_config.template.json')); json.dump(d, open('/opt/lean-engine/Launcher/config.json','w'), indent=2)"
+	sudo python3 -c "import json,sys; d=json.load(open('config/lean_config.template.json')); json.dump(d, open('$(LEAN_CONFIG)','w'), indent=2)"
 	@echo "==> Verifying $(LEAN_CONFIG)..."
 	@printf '%s\n' \
 		'import json, sys' \
