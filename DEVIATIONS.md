@@ -60,6 +60,46 @@ This file tracks all known differences between the documented/designed architect
   re-applied (automatically, by re-running `06_lean_build.sh`) after any LEAN
   Alpaca plugin update.
 
+### Alpaca plugin DLL copy — existence-check filter instead of unconditional copy
+- **Date discovered:** 2026-07-07
+- **Reason:** `setup/06_lean_build.sh` Step 8 copies every DLL produced by the
+  Alpaca plugin's own build output into LEAN's
+  `Launcher/bin/Release/` directory so LEAN's plugin loader can find the
+  Alpaca brokerage assembly. That step previously did this unconditionally
+  with `cp -f`, with no filtering — copying not just the Alpaca-specific
+  assemblies (`Alpaca.Markets.dll`, `QuantConnect.Brokerages.Alpaca.dll`) but
+  also every third-party dependency the Alpaca plugin happens to vendor in
+  its own output (`Python.Runtime.dll`, `Newtonsoft.Json.dll`,
+  `NodaTime.dll`, `CsvHelper.dll`, `MessagePack.dll`, and others). On
+  2026-07-07, a same-day `git reset --hard origin/master` pull of LEAN (Step
+  6, unpinned to any tag/commit) compiled against `Python.Runtime`
+  2.0.57.0 and placed the correct copy in `Launcher/bin/Release/`. Step 8
+  then unconditionally overwrote it with the Alpaca plugin's own vendored
+  `Python.Runtime.dll` — version 2.0.53.0, dated 2026-02-23, and not a NuGet
+  package reference in the plugin's `.csproj` (confirmed via `grep` — no
+  match), i.e. a stale binary bundled in the plugin's own build output. This
+  version collision caused `QuantConnect.Algorithm.dll` (built fresh in Step
+  6, which requires `Python.Runtime` 2.0.57.0) to conflict with the
+  downgraded 2.0.53.0 copy, so DualMomentumV2.dll's subsequent `make all`
+  build failed with `CS1705` (assembly version mismatch).
+- **Change:** Step 8 now skips copying any DLL that already exists in LEAN's
+  Release output directory (trusting that Step 6's own build already placed
+  an authoritative copy of that shared dependency), except
+  `Alpaca.Markets.dll` and `QuantConnect.Brokerages.Alpaca.dll`, which are
+  always force-overwritten since they are the actual deliverable of this
+  step. The log output now reports three counts (force-overwritten, copied,
+  skipped) instead of one combined total, so it's clear at a glance whether
+  the two critical files were actually refreshed on a given run.
+- **Impact:** This fix addresses the copy-clobbering *symptom* only. The
+  underlying root cause — that both the LEAN repo and the Alpaca plugin repo
+  are cloned via unpinned `git reset --hard origin/master` with no tag or
+  commit pinning — is **not** fixed here and remains a known risk. A future
+  same-day upstream change on either side could still introduce a
+  version-incompatible dependency that this existence-check does not (and
+  cannot) resolve, since it only decides whether to overwrite, not which
+  version is actually compatible. Pinning both repos to known-good
+  tags/commits is a separate, unaddressed follow-up.
+
 ### No Docker
 - **Date discovered:** Initial setup
 - **Reason:** Running natively on Raspberry Pi OS. Docker not used.
