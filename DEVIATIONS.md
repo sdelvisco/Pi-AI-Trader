@@ -160,6 +160,64 @@ This file tracks all known differences between the documented/designed architect
   worth watching for elsewhere in the deploy pipeline, since the same
   masking pattern could recur with other config or asset paths.
 
+### `job-user-id: ""` crashed LEAN on startup (`FormatException` in `Globals` static ctor)
+- **Date discovered:** 2026-07-07
+- **Reason:** `config/lean_config.template.json` has had `"job-user-id": ""`
+  since the file's very first commit (2026-03-06) — confirmed via `git log
+  --follow -p`; it was never edited afterward, including in the 2026-06-02
+  "clean config JSON" pass that stripped the file's comments. It only
+  surfaced as a crash today because today was the first time in months that
+  `setup/06_lean_build.sh` rebuilt LEAN from a fresh `origin/master` pull,
+  and the freshly built `QuantConnect.Globals` static constructor is what
+  actually reads this key. `Globals.Reset()`
+  (`/opt/lean-engine/Common/Globals.cs`) calls `Config.GetInt("job-user-id")`
+  with no explicit default. `Config.GetValue<T>`
+  (`/opt/lean-engine/Configuration/Config.cs`) only returns the default when
+  the key is **absent** from `config.json`; here the key is *present* with
+  value `""`, so it proceeds to `Convert.ChangeType("", typeof(int))`, which
+  throws `System.FormatException`. Because this happens inside a static
+  constructor (`QuantConnect.Globals..cctor`), .NET wraps it in a
+  `TypeInitializationException` and the process aborts (`SIGABRT`) in well
+  under a second, before `Main()` runs — i.e. before any of LEAN's own
+  logging or error handling can engage.
+- **Change:** `job-user-id` changed from `""` to `"0"` (a quoted numeric
+  string, matching LEAN's own bundled sample config), with a JSON-valid
+  `_comment_job_user_id` sibling key added directly above it explaining why.
+  A plain `//` comment was deliberately **not** used: `make deploy`
+  (Makefile) re-parses this template with Python's `json.load`, which has no
+  comment support and errors immediately on `//` — confirmed by testing, and
+  independently corroborated by `scripts/fix_lean_config.sh`'s own header,
+  which documents comment lines as a known cause of breaking that same
+  `json.load` step. This is very likely why the 2026-06-02 commit stripped
+  the file's original `//` comments in the first place.
+- **Investigation (other numeric-accessor fields):** Cloned
+  `QuantConnect/Lean` at the current `origin/master` and grepped every
+  `Config.GetInt`/`GetDouble`/`GetDecimal` call site, cross-referenced
+  against every key in the template:
+  - `"job-project-id": 0` — **not actually read under this name.**
+    `Globals.Reset()` reads `Config.GetInt("project-id")` (no `job-` prefix)
+    for `Globals.ProjectId`. `"project-id"` is absent from the template, so
+    it silently defaults to `0` — no crash, but `job-project-id` in the
+    template currently does nothing. Left unchanged (still `0`, an int
+    literal so it can't hit the empty-string crash either way); renaming it
+    to match the real key was out of scope for this fix, but a
+    `_comment_job_project_id` sibling key documents the mismatch. Flagging
+    for a future cleanup pass.
+  - `"api-access-token": ""` — read via `Config.Get` (string accessor, not
+    numeric), so an empty value is safe and intentional (populated only if
+    syncing to QuantConnect Cloud). Left unchanged.
+  - `"backtest-timeout-minutes"`, `"starting-cash"`, `"max-drawdown"` — not
+    referenced by *any* `Config.GetInt`/`GetDouble`/`GetDecimal` call in the
+    current LEAN source at all (they're valid JSON number literals already,
+    so they wouldn't hit this failure mode regardless). No action needed.
+  - No other template key collided with a `Config.GetInt`/`GetDouble`/
+    `GetDecimal` key name.
+- **Impact:** This was the last blocker after today's earlier
+  `pattern_day_trader` deserialization fix, `Python.Runtime` version
+  conflict fix, and `config.json` wrong-directory fix — `lean-trader` was
+  still crashing before any of those three could even be exercised, since
+  this failure happens before the algorithm or brokerage ever loads.
+
 ---
 
 ## Strategy
@@ -245,3 +303,4 @@ The following cosmetic issues were resolved by updates to `web/templates/dashboa
 ---
 
 *Last updated: 2026-07-07*
+
