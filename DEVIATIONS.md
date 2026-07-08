@@ -372,6 +372,95 @@ This file tracks all known differences between the documented/designed architect
   unpinned pull is the common trigger across all six incidents found in a
   single day.
 
+### `${VAR}` credential placeholders were never actually substituted, and the Alpaca config key names didn't match what `AlpacaBrokerageFactory` reads (`FormatException: String '' was not recognized as a valid Boolean`)
+- **Date discovered:** 2026-07-07
+- **Symptom:** With the handler-resolution fix above in place, `lean-trader`
+  got past job-packet/handler resolution and started loading
+  `DualMomentumV2.dll`, then crashed with `System.FormatException: String
+  '' was not recognized as a valid Boolean`, thrown from
+  `Convert.ToBoolean()` inside
+  `AlpacaBrokerageFactory.CreateBrokerage()`, called from
+  `BrokerageSetupHandler`.
+- **Investigation:** Read `QuantConnect/Lean.Brokerages.Alpaca`'s current
+  `AlpacaBrokerageFactory.cs` directly rather than guessing:
+  - Its `BrokerageData` property reads `Config.Get("alpaca-api-key")`,
+    `Config.Get("alpaca-api-secret")`, and
+    `Config.Get("alpaca-paper-trading")` — **not** `alpaca-secret-key` or
+    `paper`, the key names this template had used. `alpaca-api-key` was
+    missing from the template entirely. Since `alpaca-paper-trading` was
+    never a key in this file, `Config.Get` returned its default `""`
+    (empty string), and `Convert.ToBoolean("")` throws exactly the
+    observed exception — a key-name mismatch, not a LEAN bug.
+  - Separately checked `QuantConnect.Configuration.Config`'s full source
+    (`GetValue<T>`/`GetToken()`) for any `${VAR}` environment-variable
+    substitution: there is none. It is pure JSON-token parsing and type
+    conversion — no `Environment.GetEnvironmentVariable`,
+    `Environment.ExpandEnvironmentVariables`, or any `$`-token handling
+    anywhere in the file. `lean-trader.service`'s own header comment
+    asserts "lean.json ... reference[s] [EnvironmentFile vars] via
+    `${VAR_NAME}` syntax" — this assumption was simply wrong for this
+    version of LEAN, not a regression; `git log --follow -p` on this
+    template and on `setup/*.sh` shows no `envsubst`, `sed`, or other
+    substitution step has ever existed in this pipeline either, and
+    `make deploy`'s config-copy step was a plain
+    `json.load()`/`json.dump()` round-trip that never touched string
+    values. So these placeholders were never actually resolving to real
+    credentials, independent of the key-name bug above.
+  - Checked `AlpacaBrokerage`'s constructor to avoid introducing a new bug
+    while fixing this: it prefers OAuth (`accessToken`) over
+    `apiKey`/`apiKeySecret` whenever `accessToken` is non-empty
+    (`tradingSecretKey ?? secretKey`, and `tradingSecretKey` is only null
+    when `string.IsNullOrEmpty(accessToken)`). This template's old
+    `"alpaca-access-token": "${ALPACA_KEY_ID}"` would have been a
+    non-empty (if unsubstituted) string, silently forcing OAuth-token
+    auth using garbage placeholder text instead of the intended
+    API-key/secret auth, once the boolean crash was fixed — an eighth
+    root cause waiting to happen if only the key names had been patched.
+- **Change:**
+  - Renamed/added the three real credential keys in
+    `config/lean_config.template.json`: `alpaca-api-key` (new),
+    `alpaca-api-secret` (was `alpaca-secret-key`), `alpaca-paper-trading`
+    (was `paper`). `alpaca-access-token` is now explicitly `""` so
+    `IsNullOrEmpty()` is true and auth correctly falls through to
+    `alpaca-api-key`/`alpaca-api-secret` — this project uses API key/secret
+    auth, not Alpaca OAuth.
+  - Added `scripts/render_lean_config.py`, a new deploy-time step that
+    actually performs the `${VAR}` substitution nothing else in the
+    pipeline was doing: it reads `/etc/tradingpi/alpaca.env` directly
+    (not the process environment, since `sudo` doesn't inherit the
+    invoking shell's env), substitutes matching `${VAR}` tokens via
+    `os.path.expandvars()`, leaves unmatched tokens untouched (so
+    unrelated keys like `job-user-id`/`job-project-id` pass through
+    unaffected), validates the result as JSON, writes it to LEAN's
+    `config.json`, and `chmod 600`s it since it now contains live
+    credentials in plaintext (previously it only ever contained inert
+    placeholder text).
+  - Updated `Makefile`'s `deploy` target to call this script instead of
+    the old plain `json.load()`/`json.dump()` round-trip, and extended
+    the pre-restart config verification to confirm
+    `alpaca-api-key`/`alpaca-api-secret`/`alpaca-paper-trading` actually
+    resolved to real values (non-empty, no leftover `"${...}"` text) —
+    checking presence only, never printing the values themselves.
+    Verified the new Make recipe's `$`-escaping and the full
+    render-then-verify pipeline locally with fake, clearly-labeled
+    placeholder credentials before committing; no real Alpaca credentials
+    were used, printed, or logged during this investigation or fix.
+- **Comment format:** Documented via a
+  `_comment_alpaca_credential_keys` sibling JSON key, per the same
+  constraint established in the `job-user-id` fix — plain `//` comments
+  break `make deploy`'s Python `json.load` step.
+- **Impact:** This is the seventh distinct root cause found blocking
+  `lean-trader` startup today, and the second (after the handler-resolution
+  fix above) traced not to LEAN itself but to this project's own
+  config template having never matched what the current LEAN/Alpaca
+  plugin source actually reads — both were latent bugs masked for months
+  by the earlier crashes (`job-user-id`, then `/lean` paths, then handler
+  resolution) that each aborted startup before reaching this code path.
+  Same underlying trigger as all seven: the unpinned `git reset --hard
+  origin/master` pull done for the first time in months surfaced every
+  layer of pre-existing breakage in one session. Pinning LEAN and the
+  Alpaca plugin to specific commits/tags remains overdue.
+
 ---
 
 ## Strategy

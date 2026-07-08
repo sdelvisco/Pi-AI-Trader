@@ -12,8 +12,13 @@
 #   - LEAN installation: /opt/lean-engine/Launcher/bin/Release/
 #   - Passwordless sudo for pi-admin (add to /etc/sudoers.d/pi-admin-lean):
 #       pi-admin ALL=(ALL) NOPASSWD: /bin/cp /home/pi-admin/Pi-AI-Trader/strategies/csharp/bin/Release/net10.0/DualMomentumV2.dll /opt/lean-engine/Launcher/bin/Release/DualMomentumV2.dll
+#       pi-admin ALL=(ALL) NOPASSWD: /usr/bin/python3 /home/pi-admin/Pi-AI-Trader/scripts/render_lean_config.py *
 #       pi-admin ALL=(ALL) NOPASSWD: /bin/systemctl restart lean-trader
 #       pi-admin ALL=(ALL) NOPASSWD: /bin/systemctl start lean-trader
+#   - render_lean_config.py needs sudo (not just the config-copy step it
+#     replaces) because it must read /etc/tradingpi/alpaca.env, which is
+#     chmod 600 root:root, and write config.json into a directory owned
+#     by the lean-trader service's WorkingDirectory.
 # =============================================================================
 
 STRATEGY_DIR := strategies/csharp
@@ -31,6 +36,11 @@ DEPLOY_DIR   := /opt/lean-engine/Launcher/bin/Release
 # bin/Release/ (e.g. LEAN's own bundled sample config after a rebuild).
 LEAN_CONFIG  := /opt/lean-engine/Launcher/bin/Release/config.json
 SERVICE      := lean-trader
+# EnvironmentFile consumed by lean-trader.service; also read directly by
+# scripts/render_lean_config.py to substitute ${VAR} placeholders in the
+# config template, since neither LEAN nor `sudo` (which doesn't inherit the
+# invoking shell's environment) resolve them on their own.
+CREDENTIALS_ENV := /etc/tradingpi/alpaca.env
 
 .PHONY: all build deploy verify force-rebalance
 
@@ -59,13 +69,16 @@ build:
 # Config checks performed before restart:
 #   - algorithm-type-name == "DualMomentumV2"
 #   - algorithm-location contains "DualMomentumV2.dll"
-# If either check fails the deploy is aborted (service not restarted).
+#   - alpaca-api-key / alpaca-api-secret / alpaca-paper-trading resolved to
+#     real values (not empty, not a leftover "${...}" placeholder) -- values
+#     themselves are never printed, only whether they resolved.
+# If any check fails the deploy is aborted (service not restarted).
 # -----------------------------------------------------------------------------
 deploy:
 	@echo "==> Deploying $(DLL_NAME) to $(DEPLOY_DIR)..."
 	sudo cp "$(BUILD_OUTPUT)" "$(DEPLOY_DIR)/$(DLL_NAME)"
-	@echo "==> Copying config template to $(LEAN_CONFIG)..."
-	sudo python3 -c "import json,sys; d=json.load(open('config/lean_config.template.json')); json.dump(d, open('$(LEAN_CONFIG)','w'), indent=2)"
+	@echo "==> Rendering config template (substituting \$${VAR} credential placeholders) to $(LEAN_CONFIG)..."
+	sudo python3 scripts/render_lean_config.py config/lean_config.template.json $(CREDENTIALS_ENV) $(LEAN_CONFIG)
 	@echo "==> Verifying $(LEAN_CONFIG)..."
 	@printf '%s\n' \
 		'import json, sys' \
@@ -73,10 +86,16 @@ deploy:
 		'atn = cfg.get("algorithm-type-name", "")' \
 		'al  = cfg.get("algorithm-location",  "")' \
 		'lm  = cfg.get("live-mode", False)' \
+		'akey = cfg.get("alpaca-api-key", "")' \
+		'asec = cfg.get("alpaca-api-secret", "")' \
+		'apt  = str(cfg.get("alpaca-paper-trading", ""))' \
 		'errs = []' \
 		'if atn != "DualMomentumV2": errs.append("algorithm-type-name is " + repr(atn) + " -- expected \"DualMomentumV2\"")' \
 		'if "DualMomentumV2.dll" not in al: errs.append("algorithm-location " + repr(al) + " does not contain DualMomentumV2.dll")' \
 		'if lm is not True: errs.append("live-mode is not true -- LEAN will backtest instead of live trade")' \
+		'if not akey or "$${" in akey: errs.append("alpaca-api-key did not resolve to a real value")' \
+		'if not asec or "$${" in asec: errs.append("alpaca-api-secret did not resolve to a real value")' \
+		'if not apt or "$${" in apt: errs.append("alpaca-paper-trading did not resolve to a real value")' \
 		'[print("CONFIG ERROR: " + e) for e in errs]' \
 		'sys.exit(len(errs))' \
 		| python3
