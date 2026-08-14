@@ -461,6 +461,124 @@ This file tracks all known differences between the documented/designed architect
   layer of pre-existing breakage in one session. Pinning LEAN and the
   Alpaca plugin to specific commits/tags remains overdue.
 
+### Monthly rebalance silently failing since at least 2026-08-03: `history-provider` was never set, so `History<TradeBar>()` only ever read LEAN's bundled 21-symbol demo dataset (missing AGG entirely)
+- **Date discovered:** 2026-08-14
+- **Symptom:** The scheduled monthly rebalance (`Schedule.On(DateRules.MonthStart(...))`,
+  `strategies/csharp/DualMomentumV2.cs`) fires correctly every month, but aborts before
+  placing any orders. Live log evidence from the 2026-08-03 (August) rebalance attempt:
+  ```
+  [Rebalance] Triggered on 2026-08-03 (first trading day of August 2026)
+  [AbsMom] SPY 12-month return :
+  [AbsMom] AGG 12-month return :
+  [AbsMom] Insufficient history for absolute momentum filter. Skipping rebalance.
+  ```
+  Both return values logged blank, confirming `GetMomentumReturn()` returned `null` for
+  both `SPY` and `AGG`, which correctly triggers the `if (spyReturn == null || aggReturn
+  == null)` safety guard in `Rebalance()` — this abort behavior is correct and was not
+  changed; the fix addresses why history was unavailable in the first place, not the guard
+  itself.
+- **Investigation:**
+  - `GetMomentumReturn()` (`strategies/csharp/DualMomentumV2.cs` ~line 650) calls
+    `History<TradeBar>(sym, tradingDayEstimate, Resolution.Daily)` for both the absolute
+    momentum filter (`SPY` vs `AGG`, 12-month lookback) and the relative momentum ranking
+    (all ~50 `UniverseTickers`, 6-month lookback).
+  - `config/lean_config.template.json` has never set a `history-provider` key. LEAN's
+    `HistoryProviderManager.Initialize()` (`Engine/HistoricalData/HistoryProviderManager.cs`
+    in `QuantConnect/Lean`, cloned fresh from GitHub to confirm — not the version on the
+    Pi, which is unpinned `origin/master` per the existing "unpinned git reset --hard"
+    caveat noted elsewhere in this file) falls back to
+    `Config.Get("history-provider", "SubscriptionDataReaderHistoryProvider")` when the key
+    is absent. `SubscriptionDataReaderHistoryProvider` reads only from local disk under
+    `data-folder` — the same `/opt/lean-engine/Data` path documented in
+    `_comment_data_provider` above as LEAN's own bundled tutorial/demo dataset.
+  - Directly listed `/opt/lean-engine/Data`'s equity coverage on the Pi: 21 symbols total
+    (`spy, iwm, aapl, qqq, gooav, uw, aig, wmi, fb, foxa, eem, googl, nwsa, goog, ibm, uso,
+    bno, goocv, wm, aaa, bac`). `AGG` — the defensive/absolute-momentum-reference ticker
+    hardcoded as `DefensiveTicker` in `DualMomentumV2.cs` — is completely absent. Since
+    `GetMomentumReturn("AGG", 12)` is called on every rebalance regardless of market
+    regime, this made the absolute momentum filter fail unconditionally, aborting every
+    monthly rebalance since this deployment went live. The relative-momentum ranking would
+    have been independently degraded too: of the ~50 `UniverseTickers`, only a handful
+    (`SPY`, `IWM`, `AAPL`, `QQQ`, `EEM`, `GOOGL`) overlap with the 21-symbol demo set at
+    all.
+  - Confirmed `live-mode` data streaming was unaffected and is a separate LEAN subsystem:
+    `data-queue-handler` is already correctly set to `AlpacaBrokerage`, which is why the
+    dashboard's system health panel showed live data throughout even though rebalancing
+    was broken — `History()` (backed by `history-provider`) and live streaming (backed by
+    `data-queue-handler`) are resolved independently by LEAN.
+  - Checked whether `QuantConnect.Brokerages.Alpaca`'s `AlpacaBrokerage` supports serving
+    history at all, by cloning `QuantConnect/Lean.Brokerages.Alpaca` fresh from GitHub
+    (current default branch) and reading `AlpacaBrokerage.HistoryProvider.cs` directly: it
+    overrides `GetHistory(HistoryRequest)` and, for `SecurityType.Equity`, calls
+    `GetEquityHistory()` → `_equityHistoricalDataClient.GetHistoricalBarsAsync()` — a real
+    call to Alpaca's Market Data API via the vendored `Alpaca.Markets` SDK, not a stub.
+    `_equityHistoricalDataClient` (`AlpacaBrokerage.cs` ~line 204) is constructed from
+    `EnvironmentExtensions.GetAlpacaDataClient(environment, tradingSecretKey ?? secretKey)`,
+    where `environment` is `Environments.Paper` or `Environments.Live` selected by the same
+    `alpaca-paper-trading` flag already used for trading — i.e. the exact same
+    `alpaca-api-key`/`alpaca-api-secret`/`alpaca-paper-trading` credentials already
+    configured below serve both trading and historical data. There is no separate
+    `ALPACA_DATA_URL`/`ALPACA_BASE_URL` key in this SDK version; that turned out not to be
+    a real concern once the source was actually read, only an assumption worth checking.
+  - Checked how to activate this path: `HistoryProviderManager.Initialize()` recognizes the
+    literal config value `"BrokerageHistoryProvider"` (resolved via
+    `Composer.GetExportedValueByTypeName<IHistoryProvider>`, matching
+    `QuantConnect.Lean.Engine.HistoricalData.BrokerageHistoryProvider`'s short type name —
+    same resolution mechanism as `_comment_data_provider`'s note on `Composer`, confirmed
+    by re-reading `Extensions.MatchesTypeName`). It then wires the *already-running*
+    `AlpacaBrokerage` data-queue-handler instance into it via
+    `Composer.Instance.GetPart<IDataQueueHandler>(x => x.GetType().Name ==
+    "AlpacaBrokerage")`; separately, `Engine.cs` (~line 200) unconditionally calls
+    `historyProvider.SetBrokerage(brokerage)` with the live trading brokerage before every
+    run. No `SetBrokerage()` call or extra wiring code needs to be added anywhere in this
+    project — LEAN's launcher does it automatically once the config key is set.
+  - This is not a guess: LEAN's own bundled `Launcher/config.json` sample (in the
+    `QuantConnect/Lean` clone used for this investigation) ships a `"live-alpaca"`
+    environment block — the *same* block `_comment_handler_resolution` above already cites
+    as the source of this template's five handler keys — and its `history-provider` value,
+    copied verbatim below, is `[ "BrokerageHistoryProvider", "SubscriptionDataReaderHistoryProvider" ]`.
+    `HistoryProviderManager.GetHistory()` tries each entry in order and simply skips one
+    that returns `null` for a given request (see its `try`/`continue` loop), so listing
+    `SubscriptionDataReaderHistoryProvider` second is a harmless fallback to the local
+    demo dataset for any request Alpaca can't serve, not a silent failure mode.
+- **Change:** Added `"history-provider": [ "BrokerageHistoryProvider",
+  "SubscriptionDataReaderHistoryProvider" ]` to `config/lean_config.template.json`,
+  documented via a `_comment_history_provider` sibling JSON key (same comment-format
+  constraint as the other `_comment_*` fields in this file — `make deploy` parses this
+  file with Python's `json.load`, which has no `//` comment support).
+  `strategies/csharp/DualMomentumV2.cs` was **not** modified — the
+  `if (spyReturn == null || aggReturn == null)` abort guard remains exactly as-is, since it
+  correctly protects against genuinely unavailable history; this fix makes real history
+  available rather than bypassing the check that was correctly catching its absence.
+- **Verified from source vs. inferred:** VERIFIED (read directly from fresh clones of
+  `QuantConnect/Lean` and `QuantConnect/Lean.Brokerages.Alpaca`'s current default-branch
+  source, not guessed): `AlpacaBrokerage.GetHistory()`'s real implementation and its use of
+  the same paper/live credentials as trading; `HistoryProviderManager`'s config-key
+  resolution and automatic brokerage wiring via `Engine.cs`; LEAN's own bundled
+  `live-alpaca` sample config's exact `history-provider` value. NOT verified — remaining
+  unknowns: (1) Whether the Alpaca account's actual data entitlements/subscription tier
+  serve complete history for every one of the ~50 `UniverseTickers` (particularly the
+  Grayscale trust proxies `GBTC`/`ETHE`) — the plugin code has no per-ticker special-casing
+  for `SecurityType.Equity`, so there's no code-level reason they'd differ from `SPY`/`AGG`,
+  but this depends on Alpaca's live API responses, which cannot be exercised from this
+  investigation. (2) The exact behavior of the currently-running `/opt/lean-alpaca` build
+  on the Pi, since it was built from an unpinned `git reset --hard origin/master` pull
+  (see the "Alpaca plugin DLL copy" entry above) and may not be byte-identical to the
+  fresh clone read here, though `AlpacaBrokerage.HistoryProvider.cs` is a recently-added,
+  stable part of the plugin's public interface and not one of the files touched by this
+  project's own `ValidateSubscription()`/`GetCashBalance()` patches.
+- **Required manual verification on the Pi (this session has no SSH access to the Pi and
+  cannot run this):** after `git pull`, run `make force-rebalance` (existing target — see
+  `Makefile`) and confirm via `journalctl -u lean-trader -f` (or the equivalent log tail)
+  that `[AbsMom] SPY 12-month return` and `[AbsMom] AGG 12-month return` both log real
+  non-blank percentages, and that a representative sample of `[RelMom] <ticker>: <return>`
+  lines resolve rather than logging "insufficient history — excluded" for tickers outside
+  the old 21-symbol demo set.
+- **Impact:** This is the root cause of every monthly rebalance failing since deployment;
+  no rebalance has actually placed an order via the scheduled path. Restarting
+  `lean-trader` is required to pick up the new `config.json` — see the exact commands
+  below (this session does not restart services itself, per project convention).
+
 ---
 
 ## Strategy
@@ -545,5 +663,5 @@ The following cosmetic issues were resolved by updates to `web/templates/dashboa
 
 ---
 
-*Last updated: 2026-07-07*
+*Last updated: 2026-08-14*
 
