@@ -675,6 +675,41 @@ This file tracks all known differences between the documented/designed architect
   transition more precisely.
 - **Verification:** Pending — Lord Sal will confirm on the live Pi after deploy.
 
+**Deviation: positions() glob matched chart snapshots instead of live-state file**
+- **Date discovered:** 2026-08-19
+- **Reason:** `/api/positions` returned empty positions and $0 portfolio value
+  despite a confirmed live open position (XLK, qty 1) sitting in the actual
+  LEAN live-state file. Confirmed via curl + direct file inspection on the
+  Pi: `positions()`'s fallback glob, `results_dir.glob(f"**/*{algo_name}*.json")`,
+  wildcards on *both* sides of `algo_name`, so it matched every `.json` file
+  merely containing "DualMomentumV2" in its name — not just the live-state
+  file, but every chart snapshot LEAN writes (e.g.
+  `DualMomentumV2-<date>_minute.json`, `DualMomentumV2-<date>_10minute.json`,
+  `DualMomentumV2-<date>-<hour>_second_Strategy Equity.json`, etc.). LEAN
+  rewrites these chart files far more frequently than the live-state file,
+  so `max(candidates, key=mtime)` often selected a chart snapshot instead of
+  the live-state file. Chart JSON has no top-level `holdings` key, so
+  `data.get("holdings", {})` silently returned `{}`, producing empty
+  positions and $0 values with no error. Confirmed directly on the Pi:
+  `Results/DualMomentumV2.json` (the live-state file, correct XLK qty-1
+  holding) had mtime `1787195918`, while
+  `Results/DualMomentumV2-2026-08-20_minute.json` and sibling chart files
+  had mtime `1787196398` — 480 seconds newer — so the chart file won the
+  `max()` comparison.
+- **Change:** Changed the fallback glob in `positions()` from
+  `f"**/*{algo_name}*.json"` (wildcard on both sides) to `f"**/{algo_name}.json"`
+  (exact filename, still recursive so it still reaches `Results/` regardless
+  of depth). This matches only files literally named `DualMomentumV2.json`,
+  excluding every chart/order-event/log variant. The double-wildcard glob
+  was originally written to "handle date-stamped variants," but no such
+  variant of the live-state file itself exists in practice — only
+  chart/order-event/log files carry date stamps — so the wildcard was doing
+  nothing but accidentally matching those other files instead. `max(...,
+  key=mtime)` is kept as a no-op safety net for any future scenario with
+  multiple stale live-state copies. `trades()` and `performance()` were
+  unaffected (confirmed working via curl) and were not changed.
+- **Verification:** Pending — Lord Sal will confirm on the live Pi after deploy.
+
 ---
 
 ## Dashboard Display Issues - Fixed 2026-04-01
