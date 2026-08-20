@@ -91,8 +91,8 @@ def positions():
     Returns current open positions from the LEAN live-state file.
 
     LEAN writes algorithm state to a JSON file named after the algorithm
-    class, e.g. PiAiTrader.Strategies.DualMomentumV2.json, directly in the
-    Launcher's Release output directory (LEAN_RESULTS_DIR).
+    class, e.g. DualMomentumV2.json, under the Launcher's Release output
+    directory (LEAN_RESULTS_DIR).
 
     LEAN uses abbreviated keys in the holdings objects:
       "a"  = average price
@@ -112,11 +112,26 @@ def positions():
     # Primary: look for the exact well-known filename in LEAN_RESULTS_DIR.
     # Fallback: glob for any JSON whose name contains the algorithm class.
     #
-    # LEAN names output files using the algorithm's fully-qualified type name,
-    # including the namespace prefix.  The file is therefore named
-    # PiAiTrader.Strategies.DualMomentumV2.json, NOT DualMomentumV2.json.
+    # NOTE (fixed 2026-08-19): LEAN used to name output files using the
+    # algorithm's fully-qualified type name, including the namespace prefix
+    # (e.g. PiAiTrader.Strategies.DualMomentumV2.json). At some point on or
+    # before 2026-07-30, LEAN's output naming convention changed to use only
+    # the short class name instead. This was confirmed by a live filesystem
+    # inspection on the Pi on 2026-08-19: every result file dated 2026-07-30
+    # through 2026-08-20 under Results/ uses the short "DualMomentumV2" name
+    # (e.g. Results/DualMomentumV2.json), and NO file anywhere on disk uses
+    # the "PiAiTrader.Strategies." prefix any longer. The exact date the
+    # naming convention itself changed was not directly observed — only that
+    # no namespaced-prefix files remain. Because algo_name below previously
+    # still held the old namespaced value, it matched zero files on disk,
+    # positions()/trades()/performance() silently fell through to their
+    # "no file found" branches, and the dashboard kept rendering whatever
+    # stale data it had last successfully loaded (this surfaced as weeks of
+    # frozen July 1 data despite the engine running and filling orders
+    # normally). See DEVIATIONS.md for the full history, including the
+    # original 2026-03-10 entry this is a regression against.
     # -------------------------------------------------------------------
-    algo_name   = "PiAiTrader.Strategies.DualMomentumV2"
+    algo_name   = "DualMomentumV2"
     direct_path = results_dir / f"{algo_name}.json"
 
     if results_dir.exists() and direct_path.exists():
@@ -187,16 +202,22 @@ def trades():
     Returns recent order/trade history from the LEAN order-events file.
 
     LEAN writes order events to a file named:
-      PiAiTrader.Strategies.DualMomentumV2-<date>-order-events.json
+      DualMomentumV2-<date>-order-events.json
     where <date> is a UTC timestamp appended at run start.  If multiple
     files exist (e.g. after engine restarts) the most recently modified
     one is used.
+
+    NOTE (fixed 2026-08-19): this pattern used to be prefixed with the
+    algorithm's namespace ("PiAiTrader.Strategies."). LEAN's output naming
+    convention changed to the short class name at some point on or before
+    2026-07-30 — see the detailed comment in positions() above and
+    DEVIATIONS.md for the full explanation.
     """
     results_dir = _lean_results_dir()
 
     # Find all order-event log files for this algorithm.
     order_event_files = (
-        list(results_dir.glob("**/PiAiTrader.Strategies.DualMomentumV2-*-order-events.json"))
+        list(results_dir.glob("**/DualMomentumV2-*-order-events.json"))
         if results_dir.exists()
         else []
     )
@@ -226,15 +247,21 @@ def performance():
     Returns portfolio performance statistics from LEAN's 10-minute report.
 
     LEAN writes rolling performance snapshots to files named:
-      PiAiTrader.Strategies.DualMomentumV2-<date>_10minute.json
+      DualMomentumV2-<date>_10minute.json
     If multiple snapshots exist (engine restarts / multiple runs) the most
     recently modified one is used.
+
+    NOTE (fixed 2026-08-19): this pattern used to be prefixed with the
+    algorithm's namespace ("PiAiTrader.Strategies."). LEAN's output naming
+    convention changed to the short class name at some point on or before
+    2026-07-30 — see the detailed comment in positions() above and
+    DEVIATIONS.md for the full explanation.
     """
     results_dir = _lean_results_dir()
 
     # Find all 10-minute performance snapshot files for this algorithm.
     perf_files = (
-        list(results_dir.glob("**/PiAiTrader.Strategies.DualMomentumV2-*_10minute.json"))
+        list(results_dir.glob("**/DualMomentumV2-*_10minute.json"))
         if results_dir.exists()
         else []
     )

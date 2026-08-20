@@ -640,6 +640,41 @@ This file tracks all known differences between the documented/designed architect
   `total_portfolio_value`. `trades()` globs `*-order-events.json` files.
   `performance()` globs `*_10minute.json` files.
 
+**Deviation: API endpoints regressed after LEAN output naming changed to short class name**
+- **Date discovered:** 2026-08-19
+- **Reason:** The dashboard displayed stale July 1 data (stuck orders, blank
+  Portfolio Value/P&L, "No open positions") for weeks despite the trading
+  engine running correctly and completing real rebalances with confirmed
+  order fills on 2026-08-14 and 2026-08-17. Live filesystem inspection on
+  the Pi on 2026-08-19 found the root cause: `web/routes/api.py` hardcoded
+  `algo_name = "PiAiTrader.Strategies.DualMomentumV2"` in `positions()`,
+  `trades()`, and `performance()`, matching the fully-qualified type name
+  documented in the entry above. `find /opt/lean-engine/Launcher/bin/Release
+  -maxdepth 3 -iname "*DualMomentumV2*"` showed every current result file
+  (2026-07-30 through 2026-08-20) living under `Results/` with the *short*
+  name only, e.g. `Results/DualMomentumV2.json`,
+  `Results/DualMomentumV2-2026-08-17-order-events.json`,
+  `Results/DualMomentumV2-2026-08-19_10minute.json`. No file anywhere on
+  disk used the `PiAiTrader.Strategies.` prefix. The hardcoded `algo_name`
+  therefore matched zero files, all three endpoints fell through to their
+  "no file found" branch, and the frontend kept rendering whatever data it
+  had last successfully loaded.
+- **Change:** Updated `algo_name` in `positions()` to `"DualMomentumV2"`, and
+  updated the glob patterns in `trades()` (`**/DualMomentumV2-*-order-events.json`)
+  and `performance()` (`**/DualMomentumV2-*_10minute.json`) to drop the
+  namespace prefix. `direct_path` and the recursive fallback-glob logic were
+  left unchanged — the existing `**` glob already reaches one level deeper
+  into `Results/` from `LEAN_RESULTS_DIR` once `algo_name` is corrected, so
+  no `LEAN_RESULTS_DIR` change or new directory-traversal logic was needed.
+  Docstrings/comments in all three endpoints were updated to describe the
+  short-name convention as current fact, with a detailed comment added in
+  `positions()` explaining the naming-convention history for future readers.
+- **Note:** The exact date the LEAN naming convention changed was not
+  directly observed — only that current files (2026-07-30 onward) all use
+  the short name, and no namespaced-prefix files remain on disk to date the
+  transition more precisely.
+- **Verification:** Pending — Lord Sal will confirm on the live Pi after deploy.
+
 ---
 
 ## Dashboard Display Issues - Fixed 2026-04-01
