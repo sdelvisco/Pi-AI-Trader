@@ -110,7 +110,9 @@ def positions():
     # -------------------------------------------------------------------
     # Locate the LEAN live-state file.
     # Primary: look for the exact well-known filename in LEAN_RESULTS_DIR.
-    # Fallback: glob for any JSON whose name contains the algorithm class.
+    # Fallback: glob recursively for a file with that exact name one or more
+    # directories below LEAN_RESULTS_DIR (see the fallback glob comment below
+    # for why this is an exact-name match rather than a wildcard).
     #
     # NOTE (fixed 2026-08-19): LEAN used to name output files using the
     # algorithm's fully-qualified type name, including the namespace prefix
@@ -137,10 +139,39 @@ def positions():
     if results_dir.exists() and direct_path.exists():
         state_file = direct_path
     else:
-        # Fallback: search recursively for a file whose name contains the
-        # algorithm class name (handles date-stamped variants LEAN may write).
+        # Fallback: search recursively for the live-state file by its exact
+        # name, in case it lives one or more directories below LEAN_RESULTS_DIR
+        # (e.g. under Results/) rather than directly in it.
+        #
+        # NOTE (fixed 2026-08-19): this glob used to be
+        # f"**/*{algo_name}*.json" — wildcarded on BOTH sides of algo_name.
+        # That was originally written to "handle date-stamped variants LEAN
+        # may write," but the live-state file itself is never date-stamped —
+        # only LEAN's chart/order-event/log files are (e.g.
+        # DualMomentumV2-2026-08-20_minute.json,
+        # DualMomentumV2-2026-08-19_10minute.json,
+        # "DualMomentumV2-2026-08-20-14_second_Strategy Equity.json"). Since
+        # those files also contain "DualMomentumV2" in their name, the
+        # double-wildcard glob matched all of them too, and LEAN rewrites
+        # chart snapshots far more often than the live-state file. That let
+        # max(candidates, key=mtime) pick a chart snapshot instead of the
+        # live-state file whenever a chart file happened to be newer —
+        # confirmed on the Pi on 2026-08-19: Results/DualMomentumV2.json
+        # (the live-state file, correct XLK qty-1 holding) had mtime
+        # 1787195918, while Results/DualMomentumV2-2026-08-20_minute.json
+        # and sibling chart files had mtime 1787196398 (480s newer), so the
+        # chart file won the max() comparison. Chart JSON has no top-level
+        # "holdings" key, so data.get("holdings", {}) silently returned {},
+        # producing empty positions and $0 portfolio value with no error.
+        # Anchoring the glob to the exact filename (no wildcard around
+        # algo_name) excludes every chart/order-event/log variant, since
+        # only the literal live-state filename is matched. Only one such
+        # file should ever exist per algorithm at a time, so max(..., key=
+        # mtime) below is now a no-op safety net rather than a source of
+        # ambiguity — kept in case a future scenario leaves stale duplicates
+        # behind (e.g. across a results-directory migration).
         candidates = (
-            list(results_dir.glob(f"**/*{algo_name}*.json"))
+            list(results_dir.glob(f"**/{algo_name}.json"))
             if results_dir.exists()
             else []
         )
