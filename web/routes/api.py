@@ -109,10 +109,6 @@ def positions():
 
     # -------------------------------------------------------------------
     # Locate the LEAN live-state file.
-    # Primary: look for the exact well-known filename in LEAN_RESULTS_DIR.
-    # Fallback: glob recursively for a file with that exact name one or more
-    # directories below LEAN_RESULTS_DIR (see the fallback glob comment below
-    # for why this is an exact-name match rather than a wildcard).
     #
     # NOTE (fixed 2026-08-19): LEAN used to name output files using the
     # algorithm's fully-qualified type name, including the namespace prefix
@@ -132,52 +128,89 @@ def positions():
     # frozen July 1 data despite the engine running and filling orders
     # normally). See DEVIATIONS.md for the full history, including the
     # original 2026-03-10 entry this is a regression against.
+    #
+    # NOTE (fixed 2026-08-21): this used to have a "direct_path" fast path
+    # that checked results_dir / f"{algo_name}.json" (i.e. a flat
+    # Release/DualMomentumV2.json, with NO subdirectory) first, and only
+    # fell through to the recursive glob below if that exact flat path
+    # didn't exist. That assumption — that the live-state file lives
+    # directly in LEAN_RESULTS_DIR rather than under a subdirectory like
+    # Results/ — was already wrong as of the 2026-07-30+ naming/location
+    # change described above (the real file lives under Results/), but the
+    # fast path kept "succeeding" harmlessly as long as no file happened to
+    # exist at that flat path, since results_dir.exists() and
+    # direct_path.exists() would both be False and control would fall
+    # through to the (correct) glob.
+    #
+    # That silently broke the instant a file DID exist at the flat path.
+    # Confirmed via direct file inspection on the Pi on 2026-08-19: TWO
+    # files exist with the exact literal name "DualMomentumV2.json" —
+    # Release/DualMomentumV2.json (mtime 1772841002) and
+    # Release/Results/DualMomentumV2.json (mtime 1787283038). The first is
+    # a stale artifact from the algorithm's very first run on 2026-03-06,
+    # which crashed immediately with "Algorithm type name not found" (an
+    # unrelated, long-since-fixed config issue from initial setup) and
+    # wrote an empty holdings:{} / cash.amount:0.0 state file directly into
+    # Release/ before ever reaching Results/. It sat there unused and
+    # unnoticed for ~166 days. Because direct_path resolved to exactly that
+    # stale flat-directory file, and it existed, the fast path was taken
+    # unconditionally — BEFORE the recursive glob below (which correctly
+    # prefers the current Results/DualMomentumV2.json by mtime) was ever
+    # reached. That produced a clean-looking response (no parse error,
+    # cash_usd/total_portfolio_value present) but with empty positions and
+    # $0 portfolio value, since it was reading a crash-run artifact instead
+    # of the live state.
+    #
+    # Removing the fast path entirely and always using the mtime-max
+    # recursive glob fixes this: it naturally prefers
+    # Results/DualMomentumV2.json (current) over the stale flat-directory
+    # copy, and it remains correct if LEAN's output location changes again
+    # in the future, since it no longer hardcodes an assumption about which
+    # directory depth is "primary."
     # -------------------------------------------------------------------
-    algo_name   = "DualMomentumV2"
-    direct_path = results_dir / f"{algo_name}.json"
+    algo_name = "DualMomentumV2"
 
-    if results_dir.exists() and direct_path.exists():
-        state_file = direct_path
-    else:
-        # Fallback: search recursively for the live-state file by its exact
-        # name, in case it lives one or more directories below LEAN_RESULTS_DIR
-        # (e.g. under Results/) rather than directly in it.
-        #
-        # NOTE (fixed 2026-08-19): this glob used to be
-        # f"**/*{algo_name}*.json" — wildcarded on BOTH sides of algo_name.
-        # That was originally written to "handle date-stamped variants LEAN
-        # may write," but the live-state file itself is never date-stamped —
-        # only LEAN's chart/order-event/log files are (e.g.
-        # DualMomentumV2-2026-08-20_minute.json,
-        # DualMomentumV2-2026-08-19_10minute.json,
-        # "DualMomentumV2-2026-08-20-14_second_Strategy Equity.json"). Since
-        # those files also contain "DualMomentumV2" in their name, the
-        # double-wildcard glob matched all of them too, and LEAN rewrites
-        # chart snapshots far more often than the live-state file. That let
-        # max(candidates, key=mtime) pick a chart snapshot instead of the
-        # live-state file whenever a chart file happened to be newer —
-        # confirmed on the Pi on 2026-08-19: Results/DualMomentumV2.json
-        # (the live-state file, correct XLK qty-1 holding) had mtime
-        # 1787195918, while Results/DualMomentumV2-2026-08-20_minute.json
-        # and sibling chart files had mtime 1787196398 (480s newer), so the
-        # chart file won the max() comparison. Chart JSON has no top-level
-        # "holdings" key, so data.get("holdings", {}) silently returned {},
-        # producing empty positions and $0 portfolio value with no error.
-        # Anchoring the glob to the exact filename (no wildcard around
-        # algo_name) excludes every chart/order-event/log variant, since
-        # only the literal live-state filename is matched. Only one such
-        # file should ever exist per algorithm at a time, so max(..., key=
-        # mtime) below is now a no-op safety net rather than a source of
-        # ambiguity — kept in case a future scenario leaves stale duplicates
-        # behind (e.g. across a results-directory migration).
-        candidates = (
-            list(results_dir.glob(f"**/{algo_name}.json"))
-            if results_dir.exists()
-            else []
-        )
-        if not candidates:
-            return jsonify({"positions": [], "message": "No live results file found"})
-        state_file = max(candidates, key=lambda p: p.stat().st_mtime)
+    # Search recursively for the live-state file by its exact name, in case
+    # it lives one or more directories below LEAN_RESULTS_DIR (e.g. under
+    # Results/) rather than directly in it.
+    #
+    # NOTE (fixed 2026-08-19): this glob used to be
+    # f"**/*{algo_name}*.json" — wildcarded on BOTH sides of algo_name.
+    # That was originally written to "handle date-stamped variants LEAN
+    # may write," but the live-state file itself is never date-stamped —
+    # only LEAN's chart/order-event/log files are (e.g.
+    # DualMomentumV2-2026-08-20_minute.json,
+    # DualMomentumV2-2026-08-19_10minute.json,
+    # "DualMomentumV2-2026-08-20-14_second_Strategy Equity.json"). Since
+    # those files also contain "DualMomentumV2" in their name, the
+    # double-wildcard glob matched all of them too, and LEAN rewrites
+    # chart snapshots far more often than the live-state file. That let
+    # max(candidates, key=mtime) pick a chart snapshot instead of the
+    # live-state file whenever a chart file happened to be newer —
+    # confirmed on the Pi on 2026-08-19: Results/DualMomentumV2.json
+    # (the live-state file, correct XLK qty-1 holding) had mtime
+    # 1787195918, while Results/DualMomentumV2-2026-08-20_minute.json
+    # and sibling chart files had mtime 1787196398 (480s newer), so the
+    # chart file won the max() comparison. Chart JSON has no top-level
+    # "holdings" key, so data.get("holdings", {}) silently returned {},
+    # producing empty positions and $0 portfolio value with no error.
+    # Anchoring the glob to the exact filename (no wildcard around
+    # algo_name) excludes every chart/order-event/log variant, since
+    # only the literal live-state filename is matched.
+    #
+    # Now that the direct_path fast path above is gone, this glob (and its
+    # mtime-max selection) is the ONLY lookup path, and it doubles as the
+    # fix for the stale-duplicate-file problem too: given both the stale
+    # March 2026 crash-run file and the current Results/ file, mtime-max
+    # deterministically picks the current one.
+    candidates = (
+        list(results_dir.glob(f"**/{algo_name}.json"))
+        if results_dir.exists()
+        else []
+    )
+    if not candidates:
+        return jsonify({"positions": [], "message": "No live results file found"})
+    state_file = max(candidates, key=lambda p: p.stat().st_mtime)
 
     data = _read_json_safe(state_file)
     if data is None:

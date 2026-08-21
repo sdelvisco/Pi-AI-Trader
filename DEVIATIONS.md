@@ -710,6 +710,43 @@ This file tracks all known differences between the documented/designed architect
   unaffected (confirmed working via curl) and were not changed.
 - **Verification:** Pending — Lord Sal will confirm on the live Pi after deploy.
 
+**Deviation: positions() direct_path fast-path matched a stale March 2026 crash-run artifact**
+- **Date discovered:** 2026-08-19
+- **Reason:** `/api/positions` still returned empty positions and $0 portfolio
+  value even after the 2026-08-19 fallback-glob fix above (wildcard-both-sides
+  changed to exact-name glob). Curl confirmed the endpoint returned a clean
+  success response (no `message` field, `cash_usd`/`total_portfolio_value`
+  present) — meaning it found *a* file and parsed it without error, just not
+  the right one. Direct file inspection on the Pi on 2026-08-19 found two
+  files with the exact literal name `DualMomentumV2.json`:
+  `Launcher/bin/Release/DualMomentumV2.json` (mtime `1772841002`) and
+  `Launcher/bin/Release/Results/DualMomentumV2.json` (mtime `1787283038`).
+  The first is a stale artifact from the algorithm's very first run on
+  2026-03-06, which crashed immediately with "Algorithm type name not found"
+  (an unrelated, long-since-fixed config issue from initial setup) and wrote
+  an empty `holdings:{}` / `cash.amount:0.0` state file directly into
+  `Release/` before ever reaching `Results/`. It had sat there unused and
+  unnoticed for ~166 days. `positions()`'s `direct_path` fast-path
+  (`results_dir / f"{algo_name}.json"`) resolved to exactly that stale flat
+  file, and since it existed, that branch was taken unconditionally — before
+  the fallback glob (which was correctly fixed on 2026-08-19 to do an
+  exact-name recursive match) was ever reached. The fallback fix was correct
+  but was dead code as long as the stale file existed at that exact flat
+  path: `direct_path` always won.
+- **Change:** Removed the `direct_path` fast-path special case from
+  `positions()` entirely. It now always builds the recursive exact-name glob
+  (`results_dir.glob(f"**/{algo_name}.json")`) and selects the newest match by
+  mtime. This naturally prefers `Results/DualMomentumV2.json` (mtime
+  `1787283038`, current) over the stale flat-directory copy (mtime
+  `1772841002`), and remains correct if LEAN's output location changes again
+  in the future, since it no longer hardcodes an assumption about which
+  directory depth is "primary." The stale file itself
+  (`Launcher/bin/Release/DualMomentumV2.json`) was intentionally left in
+  place — only the file-selection logic in `api.py` changed; cleaning up the
+  stale file on disk is a separate manual decision for Lord Sal.
+- **Verification:** Pending — Lord Sal will confirm via curl and the live
+  dashboard after deploy.
+
 ---
 
 ## Dashboard Display Issues - Fixed 2026-04-01
@@ -734,4 +771,3 @@ The following cosmetic issues were resolved by updates to `web/templates/dashboa
 ---
 
 *Last updated: 2026-08-14*
-
