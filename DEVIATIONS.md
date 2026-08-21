@@ -100,6 +100,55 @@ This file tracks all known differences between the documented/designed architect
   version is actually compatible. Pinning both repos to known-good
   tags/commits is a separate, unaddressed follow-up.
 
+### Deviation: LEAN engine and Alpaca plugin pinned to fixed commits instead of floating master
+- **Date discovered:** 2026-08-19
+- **Reason:** `setup/06_lean_build.sh` cloned both `QuantConnect/Lean` and
+  `QuantConnect/Lean.Brokerages.Alpaca` with `git clone --depth 1` and, on any
+  re-run, did `git fetch origin && git reset --hard origin/master` —
+  floating to whatever the latest commit on `master` happened to be at build
+  time, with no tag or commit pinning. As documented in the two entries
+  directly above ("Alpaca brokerage plugin — GetCashBalance() bypasses
+  GetAccountAsync()" and "Alpaca plugin DLL copy"), one such unpinned
+  `git reset --hard origin/master` on 2026-07-07 produced seven distinct
+  root-cause bugs in a single session (the `pattern_day_trader`
+  deserialization break, the `Python.Runtime.dll` version conflict, the
+  LEAN output-file naming-convention change, and four others), all traced
+  back to that single floating pull surfacing months of latent breakage at
+  once. The "Alpaca plugin DLL copy" entry above explicitly flagged pinning
+  both repos as an unaddressed follow-up; this entry closes that follow-up.
+- **Change:** Added `LEAN_PINNED_COMMIT="c88955b91a00c9d061228f809c7a192d8fb7e9ea"`
+  and `ALPACA_PINNED_COMMIT="86f896e46992a74df4dc5cd12f8d8aa1f86869d8"` to
+  `setup/06_lean_build.sh` — both confirmed via `git rev-parse HEAD` on the
+  Pi on 2026-08-19 as the exact source state currently built, patched, and
+  running successfully in production, one day before the 2026-07-07
+  incident. Steps 1 and 2 (LEAN engine and Alpaca plugin checkout) no longer
+  do an unconditional `fetch` + `reset --hard origin/master`; they now
+  compare the working tree's current `HEAD` against the pinned SHA and, if
+  it already matches, do nothing. Otherwise they shallow-fetch the exact
+  pinned commit (`git fetch --depth 1 origin <sha>`) and check it out
+  detached (`git checkout --detach FETCH_HEAD`), rather than pulling all of
+  `master`'s history. A fresh checkout (no existing clone) uses `git init` +
+  `git remote add` + the same shallow-fetch-by-SHA, instead of
+  `git clone --depth 1` followed by whatever `master` resolves to at clone
+  time. Both shallow-fetch-by-SHA commands were tested directly against
+  `github.com/QuantConnect/Lean` and
+  `github.com/QuantConnect/Lean.Brokerages.Alpaca` with these exact SHAs
+  before landing this change, and both succeeded — GitHub does allow
+  fetching arbitrary commit SHAs on these repos, so the shallow-fetch path
+  was used for both, with a full-clone-and-checkout fallback documented
+  inline (in both script comments and `die` messages) in case that ever
+  stops working for a future pin update. A verbose comment at the pinned
+  commit declarations documents the deliberate update procedure: fetch the
+  candidate commit manually and confirm it builds, re-verify both
+  hand-applied `AlpacaBrokerage.cs` patches (`ValidateSubscription()`
+  comment-out and the `GetCashBalance()`/`pattern_day_trader` bypass) still
+  apply cleanly against the new source, then update the SHA constants and
+  re-run `06_lean_build.sh` end-to-end.
+- **Verification:** Pending — Lord Sal will re-run `setup/06_lean_build.sh`
+  on a test basis (or confirm the current production build already matches
+  these commits and no rebuild is needed) before this is considered fully
+  verified.
+
 ### No Docker
 - **Date discovered:** Initial setup
 - **Reason:** Running natively on Raspberry Pi OS. Docker not used.
