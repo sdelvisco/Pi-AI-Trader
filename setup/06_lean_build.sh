@@ -11,8 +11,8 @@
 #   - Builds run natively using the .NET 10 SDK already installed by 04_dotnet.sh
 #
 # What this script does:
-#   1. Clones QuantConnect/Lean             → /opt/lean-engine
-#   2. Clones QuantConnect/Lean.Brokerages.Alpaca → /opt/lean-alpaca
+#   1. Checks out QuantConnect/Lean             → /opt/lean-engine, pinned to a fixed commit
+#   2. Checks out QuantConnect/Lean.Brokerages.Alpaca → /opt/lean-alpaca, pinned to a fixed commit
 #   3. Patches AlpacaBrokerage.cs to comment out ValidateSubscription()
 #      (this call fails for free QuantConnect accounts at runtime)
 #   4. Patches AlpacaBrokerage.cs to bypass GetAccountAsync() in GetCashBalance()
@@ -86,6 +86,32 @@ LEAN_ALPACA_DIR="/opt/lean-alpaca"
 LEAN_REPO_URL="https://github.com/QuantConnect/Lean.git"
 ALPACA_REPO_URL="https://github.com/QuantConnect/Lean.Brokerages.Alpaca.git"
 
+# Pinned commits — the exact source state already built and running
+# successfully on tradingpi (confirmed via `git rev-parse HEAD` on
+# 2026-08-19). Floating to origin/master here previously caused seven
+# distinct root-cause bugs in a single session (see DEVIATIONS.md,
+# 2026-07-07 incident). Both commits below predate that incident by one
+# day and are the last known-good, currently-deployed state. Update
+# these deliberately (and re-verify the two hand-applied patches still
+# apply cleanly, and re-test a full deploy) rather than bumping them
+# reflexively when a newer upstream commit becomes available.
+#
+# Update procedure for a deliberate version bump:
+#   1. Fetch the candidate commit manually (e.g. `git fetch --depth 1 origin
+#      <new-sha>` in a scratch clone of the relevant repo) and confirm it
+#      builds on its own before touching this script.
+#   2. Re-verify both hand-applied AlpacaBrokerage.cs patches (the
+#      ValidateSubscription() comment-out in Step 3, and the
+#      GetCashBalance()/pattern_day_trader bypass in Step 4) still apply
+#      cleanly against the new source — their Python string-replacement
+#      anchors assert on exact text and will fail loudly if upstream has
+#      changed the surrounding code.
+#   3. Only then update LEAN_PINNED_COMMIT / ALPACA_PINNED_COMMIT below and
+#      re-run 06_lean_build.sh end-to-end (including the LEAN/Alpaca builds
+#      and the deploy pipeline) to confirm nothing regresses.
+LEAN_PINNED_COMMIT="c88955b91a00c9d061228f809c7a192d8fb7e9ea"
+ALPACA_PINNED_COMMIT="86f896e46992a74df4dc5cd12f8d8aa1f86869d8"
+
 # Solution files for each component.
 LEAN_SLN="${LEAN_ENGINE_DIR}/QuantConnect.Lean.sln"
 ALPACA_SLN="${LEAN_ALPACA_DIR}/QuantConnect.AlpacaBrokerage.sln"
@@ -140,17 +166,23 @@ echo "  Do NOT interrupt the script once building begins."
 echo ""
 
 # -----------------------------------------------------------------------------
-# Step 1: Clone the LEAN engine
+# Step 1: Check out the LEAN engine at its pinned commit
 # -----------------------------------------------------------------------------
-section "Cloning LEAN engine from source"
+section "Checking out LEAN engine at pinned commit $LEAN_PINNED_COMMIT"
 
 if [[ -d "${LEAN_ENGINE_DIR}/.git" ]]; then
-    info "LEAN engine repository already exists at $LEAN_ENGINE_DIR — pulling latest"
-    git -C "$LEAN_ENGINE_DIR" fetch origin \
-        || die "git fetch failed for LEAN engine — check internet connectivity"
-    git -C "$LEAN_ENGINE_DIR" reset --hard origin/master \
-        || die "git reset failed for LEAN engine"
-    info "LEAN engine repository updated."
+    CURRENT_LEAN_COMMIT="$(git -C "$LEAN_ENGINE_DIR" rev-parse HEAD)"
+    if [[ "$CURRENT_LEAN_COMMIT" == "$LEAN_PINNED_COMMIT" ]]; then
+        info "LEAN engine already at pinned commit $LEAN_PINNED_COMMIT — nothing to do"
+    else
+        info "Fetching pinned commit $LEAN_PINNED_COMMIT (current: $CURRENT_LEAN_COMMIT)"
+        git -C "$LEAN_ENGINE_DIR" fetch --depth 1 origin "$LEAN_PINNED_COMMIT" \
+            || die "git fetch of pinned commit failed for LEAN engine — origin may not
+               allow fetching by SHA; a full clone + checkout may be required instead"
+        git -C "$LEAN_ENGINE_DIR" checkout --detach FETCH_HEAD \
+            || die "git checkout of pinned commit failed for LEAN engine"
+        info "LEAN engine checked out at pinned commit $LEAN_PINNED_COMMIT (detached HEAD — expected, this is a build-only checkout, not a working branch)"
+    fi
 else
     # Remove a partial clone directory if it exists but is not a git repo.
     if [[ -d "$LEAN_ENGINE_DIR" ]]; then
@@ -158,13 +190,29 @@ else
         rm -rf "$LEAN_ENGINE_DIR"
     fi
 
-    info "Cloning $LEAN_REPO_URL → $LEAN_ENGINE_DIR"
+    info "Fetching $LEAN_REPO_URL @ $LEAN_PINNED_COMMIT → $LEAN_ENGINE_DIR"
     info "This may take several minutes depending on connection speed..."
 
-    git clone --depth 1 "$LEAN_REPO_URL" "$LEAN_ENGINE_DIR" \
-        || die "git clone failed for LEAN engine — check internet connectivity"
+    # Shallow-fetch by exact SHA rather than a full `git clone` + checkout, so
+    # we never pull down the full history just to land on one pinned commit.
+    # Confirmed working against github.com/QuantConnect/Lean with this exact
+    # SHA (2026-08-19) — some git servers reject fetching non-tip/non-tag
+    # SHAs, so if this ever starts failing on a future pin update, fall back
+    # to a full `git clone "$LEAN_REPO_URL" "$LEAN_ENGINE_DIR"` followed by
+    # `git checkout --detach "$LEAN_PINNED_COMMIT"` instead.
+    git init "$LEAN_ENGINE_DIR" \
+        || die "git init failed for LEAN engine"
+    git -C "$LEAN_ENGINE_DIR" remote add origin "$LEAN_REPO_URL" \
+        || die "git remote add failed for LEAN engine"
+    git -C "$LEAN_ENGINE_DIR" fetch --depth 1 origin "$LEAN_PINNED_COMMIT" \
+        || die "git fetch of pinned commit failed for LEAN engine — check internet
+           connectivity, or origin may not support fetching by exact SHA (test this
+           manually before relying on it in production; fall back to a full
+           'git clone $LEAN_REPO_URL' + 'git checkout $LEAN_PINNED_COMMIT' if it fails)"
+    git -C "$LEAN_ENGINE_DIR" checkout --detach FETCH_HEAD \
+        || die "git checkout of pinned commit failed for LEAN engine"
 
-    info "LEAN engine clone complete."
+    info "LEAN engine checkout complete."
 fi
 
 # Verify the solution file is present after cloning.
@@ -174,30 +222,53 @@ fi
 info "LEAN solution file confirmed: $LEAN_SLN"
 
 # -----------------------------------------------------------------------------
-# Step 2: Clone the Alpaca brokerage plugin
+# Step 2: Check out the Alpaca brokerage plugin at its pinned commit
 # -----------------------------------------------------------------------------
-section "Cloning Alpaca brokerage plugin from source"
+section "Checking out Alpaca brokerage plugin at pinned commit $ALPACA_PINNED_COMMIT"
 
 if [[ -d "${LEAN_ALPACA_DIR}/.git" ]]; then
-    info "Alpaca plugin repository already exists at $LEAN_ALPACA_DIR — pulling latest"
-    git -C "$LEAN_ALPACA_DIR" fetch origin \
-        || die "git fetch failed for Alpaca plugin — check internet connectivity"
-    git -C "$LEAN_ALPACA_DIR" reset --hard origin/master \
-        || die "git reset failed for Alpaca plugin"
-    info "Alpaca plugin repository updated."
+    CURRENT_ALPACA_COMMIT="$(git -C "$LEAN_ALPACA_DIR" rev-parse HEAD)"
+    if [[ "$CURRENT_ALPACA_COMMIT" == "$ALPACA_PINNED_COMMIT" ]]; then
+        info "Alpaca plugin already at pinned commit $ALPACA_PINNED_COMMIT — nothing to do"
+    else
+        info "Fetching pinned commit $ALPACA_PINNED_COMMIT (current: $CURRENT_ALPACA_COMMIT)"
+        git -C "$LEAN_ALPACA_DIR" fetch --depth 1 origin "$ALPACA_PINNED_COMMIT" \
+            || die "git fetch of pinned commit failed for Alpaca plugin — origin may not
+               allow fetching by SHA; a full clone + checkout may be required instead"
+        git -C "$LEAN_ALPACA_DIR" checkout --detach FETCH_HEAD \
+            || die "git checkout of pinned commit failed for Alpaca plugin"
+        info "Alpaca plugin checked out at pinned commit $ALPACA_PINNED_COMMIT (detached HEAD — expected, this is a build-only checkout, not a working branch)"
+    fi
 else
     if [[ -d "$LEAN_ALPACA_DIR" ]]; then
         info "Removing incomplete directory at $LEAN_ALPACA_DIR before cloning"
         rm -rf "$LEAN_ALPACA_DIR"
     fi
 
-    info "Cloning $ALPACA_REPO_URL → $LEAN_ALPACA_DIR"
+    info "Fetching $ALPACA_REPO_URL @ $ALPACA_PINNED_COMMIT → $LEAN_ALPACA_DIR"
     info "This may take a few minutes depending on connection speed..."
 
-    git clone --depth 1 "$ALPACA_REPO_URL" "$LEAN_ALPACA_DIR" \
-        || die "git clone failed for Alpaca plugin — check internet connectivity"
+    # Shallow-fetch by exact SHA rather than a full `git clone` + checkout, so
+    # we never pull down the full history just to land on one pinned commit.
+    # Confirmed working against github.com/QuantConnect/Lean.Brokerages.Alpaca
+    # with this exact SHA (2026-08-19) — some git servers reject fetching
+    # non-tip/non-tag SHAs, so if this ever starts failing on a future pin
+    # update, fall back to a full `git clone "$ALPACA_REPO_URL"
+    # "$LEAN_ALPACA_DIR"` followed by `git checkout --detach
+    # "$ALPACA_PINNED_COMMIT"` instead.
+    git init "$LEAN_ALPACA_DIR" \
+        || die "git init failed for Alpaca plugin"
+    git -C "$LEAN_ALPACA_DIR" remote add origin "$ALPACA_REPO_URL" \
+        || die "git remote add failed for Alpaca plugin"
+    git -C "$LEAN_ALPACA_DIR" fetch --depth 1 origin "$ALPACA_PINNED_COMMIT" \
+        || die "git fetch of pinned commit failed for Alpaca plugin — check internet
+           connectivity, or origin may not support fetching by exact SHA (test this
+           manually before relying on it in production; fall back to a full
+           'git clone $ALPACA_REPO_URL' + 'git checkout $ALPACA_PINNED_COMMIT' if it fails)"
+    git -C "$LEAN_ALPACA_DIR" checkout --detach FETCH_HEAD \
+        || die "git checkout of pinned commit failed for Alpaca plugin"
 
-    info "Alpaca plugin clone complete."
+    info "Alpaca plugin checkout complete."
 fi
 
 # Verify the solution file is present.
