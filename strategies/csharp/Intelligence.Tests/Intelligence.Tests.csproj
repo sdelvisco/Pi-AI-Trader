@@ -15,7 +15,7 @@
   directly.
 
   Normal run (never touches the network):
-    dotnet test strategies/csharp/Intelligence.Tests/Intelligence.Tests.csproj --filter Category!=LiveSmoke
+    dotnet test strategies/csharp/Intelligence.Tests/Intelligence.Tests.csproj filter: Category!=LiveSmoke
 
   Deliberate, manual, real-network run of the one live smoke test:
     dotnet test strategies/csharp/Intelligence.Tests/Intelligence.Tests.csproj --filter Category=LiveSmoke
