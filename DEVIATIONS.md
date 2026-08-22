@@ -819,4 +819,125 @@ The following cosmetic issues were resolved by updates to `web/templates/dashboa
 
 ---
 
-*Last updated: 2026-08-14*
+## Intelligence Layer (Phase 2) — LLM Headline Sentiment Module
+
+### Task prompt said "commit directly to main", contradicting this repo's actual branching policy
+- **Date discovered:** 2026-08-22
+- **Reason:** The task prompt for this session opened with "Repository convention — read
+  first: Commit directly to `main`. No feature branches, no PRs... documented project
+  convention (see CLAUDE.md)". This is false: `CLAUDE.md` actually says the opposite
+  ("Each task gets its own feature branch and pull request. Do not commit directly to
+  `main`... Do NOT merge the PR yourself — Lord Sal reviews and merges manually"), and this
+  session's own harness instructions independently assigned a specific feature branch
+  (`claude/llm-headline-sentiment-phase2-0ccse4`) with the same no-direct-to-main rule.
+- **Change:** Followed the actual repo convention (CLAUDE.md + harness instructions) instead
+  of the prompt's embedded instruction: developed this session's work on the assigned feature
+  branch and pushed there, not to `main`, and did not merge the resulting PR. Flagged this
+  discrepancy to the user directly at the start of the session rather than silently complying
+  with an instruction that would have bypassed Lord Sal's review.
+- **Impact:** None on the code itself — purely a process deviation from the task prompt, in
+  favor of the repo's own documented and harness-enforced policy.
+
+### No existing C#/.NET test project or mocking convention anywhere in this repo
+- **Date discovered:** 2026-08-22
+- **Reason:** Searched the repo (`find . -iname "*test*"`) before adding
+  `Intelligence.Tests` — there was no prior C# test project, no test framework reference
+  anywhere in any `.csproj`, and no established HTTP-mocking convention to match, per this
+  session's explicit instruction to check before assuming.
+- **Change:** Added `strategies/csharp/Intelligence.Tests/Intelligence.Tests.csproj` using
+  xUnit (the de facto default for modern .NET) plus hand-rolled test doubles
+  (`FakeHttpMessageHandler`, `FakeLlmClient`, `CapturingLogHandler`) instead of a mocking
+  library like Moq, since `HttpMessageHandler`/`ILlmClient`/`ILogHandler` are all small
+  interfaces that are easy to fake directly and this avoids introducing a new dependency with
+  no established precedent in the repo.
+
+### Sandbox could not build against net10.0 or the real LEAN DLLs — validated logic against .NET 8 with stand-ins instead
+- **Date discovered:** 2026-08-22
+- **Reason:** This session's sandboxed container had no .NET SDK preinstalled, no
+  `/opt/lean-engine` (the real LEAN build output `Intelligence.csproj`/`Intelligence.Tests.csproj`
+  reference via HintPath, per the project's established convention), and the official
+  `dot.net` SDK-installer domain is blocked by this session's egress policy (403, reported
+  rather than routed around, per the proxy's own rules). `apt-get install dotnet-sdk-10.0`
+  also failed (404s from the Ubuntu security mirror for the 10.0 packages specifically), but
+  `dotnet-sdk-8.0` installed successfully from the same mirror.
+- **Change:** Built a throwaway scratch project (outside this repo, in the session's
+  scratchpad — never committed) that compiles the real, unmodified
+  `strategies/csharp/Intelligence/*.cs` and `strategies/csharp/Intelligence.Tests/*.cs`
+  source files against `net8.0`, using a small local stand-in for the two-method
+  `QuantConnect.Logging.Log`/`ILogHandler` surface these files use (confirmed via LEAN's own
+  GitHub source that `QuantConnect.Logging` has no further transitive dependencies, so this
+  stand-in is a faithful shape-match) and a real `Newtonsoft.Json` NuGet package (nuget.org
+  was reachable) in place of the HintPath reference to LEAN's build output. All 21 non-live
+  unit tests passed; the live smoke test was independently confirmed to be correctly
+  included/excluded by the `Category=LiveSmoke` / `Category!=LiveSmoke` trait filters (it
+  fails with the expected `LlmConfigurationException` in this sandbox, which has no real
+  Azure credentials — that failure is proof the gating and the config-validation code path
+  both work, not a bug).
+- **Bug found and fixed by this validation:** `AzureLlmClient.CompleteJsonAsync` originally
+  extracted the response with `envelope["choices"]?[0]?["message"]?["content"]`. Newtonsoft's
+  `JArray` indexer throws `ArgumentOutOfRangeException` for an out-of-bounds index even under
+  the null-conditional operator — `?[0]` only guards against `choices` itself being null, not
+  against it being an empty array — so a response like `{"choices":[]}` crashed with an
+  unhandled `ArgumentOutOfRangeException` instead of the intended
+  `LlmRequestException("...did not contain a usable choices[0].message.content...")`. Fixed
+  by explicitly casting to `JArray` and checking `Count > 0` before indexing. Caught directly
+  by a unit test (`CompleteJsonAsync_ResponseMissingMessageContent_ThrowsLlmRequestException`)
+  during this validation pass, not by inspection.
+- **Impact / what remains unverified:** The actual committed `Intelligence.csproj` and
+  `Intelligence.Tests.csproj` (targeting `net10.0` with real HintPath references to
+  `/opt/lean-engine/Launcher/bin/Release/{QuantConnect.Logging,Newtonsoft.Json}.dll`) were
+  never built in this session — only this net8.0/stand-in stand-in of the identical source
+  code was. Before deploying, run `dotnet build`/`dotnet test` for real against the actual
+  net10.0 SDK and the actual LEAN build output (on the Pi or a dev machine with LEAN built)
+  to confirm the real HintPath references resolve as expected; this is very likely to work
+  given `QuantConnect.Logging`'s confirmed lack of further dependencies, but "very likely" is
+  not "confirmed."
+
+### Azure AI Foundry v1 auth header — confirmed via search, not a live call
+- **Date discovered:** 2026-08-22
+- **Reason:** This session's prompt asked to confirm whether the Azure AI Foundry
+  `/openai/v1/chat/completions` surface uses `Authorization: Bearer <key>` or a classic
+  `api-key: <key>` header for API-key auth, since a wrong header fails silently as a 401 at
+  runtime rather than a compile-time error. Direct fetches of `learn.microsoft.com` pages
+  were blocked by this session's egress policy, so this was confirmed via web search result
+  summaries of Microsoft Learn content instead of reading the page directly.
+- **Change:** Implemented `Authorization: Bearer <AZURE_LLM_API_KEY>`, per this session's
+  prompt and corroborated by search: the newer, OpenAI-SDK-compatible `/openai/v1/...`
+  surface (distinct from the classic `/openai/deployments/{deployment}/...?api-version=...`
+  surface, which does use `api-key:`) accepts the API key as a Bearer token specifically so
+  the unmodified OpenAI SDK works against Azure endpoints.
+- **Impact:** Not independently confirmed against a real live call in this session — that
+  requires running the live smoke test (`AzureLlmClientLiveSmokeTest`, tagged
+  `Category=LiveSmoke`) with real credentials, which this session could not do (no network
+  access to the real Azure endpoint from this sandbox, and no real credentials available
+  here regardless). If it turns out to be wrong, the fix is a one-line change to
+  `AzureLlmClient.CompleteJsonAsync`'s `Authorization` header (or adding an `api-key` header
+  instead) — flagging this explicitly rather than treating it as settled.
+
+### Added `config/azure_credentials.template` (not explicitly requested, but implied by the prompt's own instruction)
+- **Date discovered:** 2026-08-22
+- **Reason:** The prompt said the three `AZURE_LLM_*` env vars "will be sourced from a new
+  file, `/etc/tradingpi/azure.env`, on the Pi, following the exact same pattern as the
+  existing `/etc/tradingpi/alpaca.env`" — and `/etc/tradingpi/alpaca.env` itself is populated
+  by copying the git-tracked `config/alpaca_credentials.template`.
+- **Change:** Added `config/azure_credentials.template`, mirroring
+  `config/alpaca_credentials.template`'s structure/comments, documenting the three
+  `AZURE_LLM_*` variables and the same copy-to-`/etc/tradingpi/`-and-`chmod 600` steps. Not a
+  strict requirement of the deliverables checklist, but a direct, low-risk consequence of
+  "follow the exact same pattern as alpaca.env" and needed on the Pi regardless of who writes
+  it.
+
+### QuantConnect.Logging.Log has no dedicated "Warning" level
+- **Date discovered:** 2026-08-22
+- **Reason:** The prompt asks for direction/score and ticker-mismatch sanity checks to be
+  "logged" as warnings (non-fatal — the Signal is still returned) while malformed-response
+  failures are logged before throwing. Confirmed via LEAN's own GitHub source
+  (`Logging/Log.cs`) that `QuantConnect.Logging.Log` only exposes `Trace`/`Debug`/`Error`
+  static methods — there is no separate `Warning` method to call.
+  `strategies/csharp/Intelligence/LlmSentimentModule.cs` uses `Log.Trace(...)` with an
+  explicit `"WARNING:"` text prefix for the two non-fatal sanity-check cases (direction/score
+  disagreement, ticker fallback), reserving `Log.Error` for lines that are paired with an
+  actually-thrown exception. Documented directly in that class's own doc comment as well, so
+  a future reader doesn't need to rediscover this from LEAN's source again.
+
+*Last updated: 2026-08-22*

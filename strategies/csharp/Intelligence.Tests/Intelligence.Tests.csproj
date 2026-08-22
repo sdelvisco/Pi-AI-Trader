@@ -1,0 +1,60 @@
+<!--
+  Intelligence.Tests.csproj
+  ==========================
+  Unit tests (mocked HTTP, no real network calls) plus one explicitly-gated
+  live smoke test (see AzureLlmClientLiveSmokeTest.cs) for the Phase 2
+  Intelligence layer.
+
+  This repo had no existing C#/.NET test project or established test
+  framework/mocking convention to match (searched before adding this — see
+  DEVIATIONS.md), so this project uses xUnit (the de facto default for
+  modern .NET) plus a couple of hand-rolled test doubles
+  (FakeHttpMessageHandler, FakeLlmClient, CapturingLogHandler) instead of
+  pulling in a mocking library, since .NET's HttpMessageHandler and this
+  session's own ILlmClient/ILogHandler interfaces are already easy to fake
+  directly.
+
+  Normal run (never touches the network):
+    dotnet test strategies/csharp/Intelligence.Tests/Intelligence.Tests.csproj --filter Category!=LiveSmoke
+
+  Deliberate, manual, real-network run of the one live smoke test:
+    dotnet test strategies/csharp/Intelligence.Tests/Intelligence.Tests.csproj --filter Category=LiveSmoke
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Match the LEAN build's target framework (see DEVIATIONS.md). -->
+    <TargetFramework>net10.0</TargetFramework>
+
+    <!-- Match DualMomentumV2.csproj's style: no nullable annotations, no
+         implicit global usings, explicit `using` in every file. -->
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+
+    <!-- Test projects are never packed/published as a NuGet package. -->
+    <IsPackable>false</IsPackable>
+
+    <!-- Suppress "missing XML doc" warnings, per project convention. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Standard xUnit + VSTest adapter + the .NET test SDK, so this
+         project can be run with a plain `dotnet test`. These are ordinary
+         NuGet PackageReferences (unlike the LEAN-linking projects in this
+         repo) since this project only needs to compile against the
+         Intelligence library and doesn't itself need to resolve LEAN's own
+         assemblies. -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Intelligence/Intelligence.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,93 @@
+<!--
+  Intelligence.csproj
+  ====================
+  Builds the Phase 2 AI/intelligence-layer contracts and implementations
+  (Signal/SignalRequest/IIntelligenceModule/ILlmClient, AzureLlmClient,
+  LlmSentimentModule) as a standalone class library, targeting net10.0 to
+  match every other project in this repo (see DEVIATIONS.md, ".NET 10 (not
+  .NET 8)").
+
+  Unlike DualMomentumV2.csproj, this project does NOT reference any LEAN
+  QuantConnect.Algorithm/Framework/Indicators assemblies — nothing in this
+  folder touches QCAlgorithm or the trading engine directly. It only needs
+  QuantConnect.Logging (so log lines land in the same LEAN log output the
+  rest of this project already reviews, e.g. Release/Results/log.txt) and
+  Newtonsoft.Json (already vendored into LEAN's build output, since
+  QuantConnect.Common itself depends on it — see DEVIATIONS.md for the
+  project's established "file-based HintPath, no NuGet" convention for
+  anything that must link against the local LEAN build).
+
+  To build:
+    dotnet build strategies/csharp/Intelligence/Intelligence.csproj -c Release
+
+  This library is not part of the `make build`/`make deploy` LEAN pipeline
+  yet — wiring it into DualMomentumV2 (or a future Signal Aggregator) is
+  explicitly out of scope for this session.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Match the LEAN build's target framework (see DEVIATIONS.md). -->
+    <TargetFramework>net10.0</TargetFramework>
+
+    <OutputType>Library</OutputType>
+
+    <AssemblyName>PiAiTrader.Intelligence</AssemblyName>
+    <RootNamespace>PiAiTrader.Intelligence</RootNamespace>
+
+    <OutputPath>bin/Release/</OutputPath>
+
+    <Deterministic>true</Deterministic>
+
+    <!-- Match DualMomentumV2.csproj's style: no nullable annotations, no
+         implicit global usings, explicit `using` in every file. -->
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+
+    <!-- Docs are inline comments only, per project convention (see
+         DualMomentumV2.csproj) — suppress "missing XML doc" warnings. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <!-- ======================================================================
+       Local LEAN DLL references (file-based HintPath, no NuGet packages —
+       same convention as DualMomentumV2.csproj).
+       ====================================================================== -->
+  <ItemGroup>
+
+    <!--
+      QuantConnect.Logging.dll
+      Gives us QuantConnect.Logging.Log, LEAN's own static logger. Used
+      instead of Console.WriteLine so LLM rationale/warning lines land in
+      the same log output (Release/Results/log.txt) the rest of this
+      project already monitors, per this session's explicit requirement
+      that LLM rationale be logged "for later review... independent of
+      wherever the Signal ends up". Confirmed via LEAN's own source
+      (Logging/QuantConnect.Logging.csproj) that this assembly has no
+      dependency on QuantConnect.Common or Python.Runtime, so — unlike
+      DualMomentumV2.csproj — no extra transitive references are needed
+      here to avoid CS0012.
+    -->
+    <Reference Include="QuantConnect.Logging">
+      <HintPath>/opt/lean-engine/Launcher/bin/Release/QuantConnect.Logging.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!--
+      Newtonsoft.Json.dll
+      Used to parse the Azure LLM chat-completion envelope and the
+      sentiment-scoring JSON payload. Not a fresh dependency choice: LEAN's
+      own QuantConnect.Common project (Common/QuantConnect.csproj) already
+      pulls in Newtonsoft.Json 13.0.2 as a PackageReference, so this DLL is
+      already present in LEAN's build output. Using it here matches the
+      JSON library already established throughout this LEAN-based codebase
+      rather than introducing System.Text.Json as a second JSON stack.
+    -->
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>/opt/lean-engine/Launcher/bin/Release/Newtonsoft.Json.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+  </ItemGroup>
+
+</Project>
