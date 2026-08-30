@@ -1,0 +1,132 @@
+# =============================================================================
+# headline-news-pipeline.service — Headline News Pipeline (Phase 2 AI Layer)
+# =============================================================================
+# Polls Alpaca's News API every 15 minutes for headlines tagged against
+# DualMomentumV2's trading universe, scores each relevant headline/ticker
+# pair via PiAiTrader.Intelligence.LlmSentimentModule (Azure AI Foundry),
+# and appends the resulting Signal objects to a local JSON-lines file for a
+# future Signal Aggregator (not built yet) to consume.
+#
+# Deliberately its own service, wired into NOTHING else on this box: it does
+# not read from, write to, or otherwise touch lean-trader/lean-web or
+# DualMomentumV2's live/paper trading path in any way. The LLM signal this
+# pipeline produces has not been validated yet, so keeping its failure modes
+# (network issues, Azure rate limits, malformed news data) completely
+# isolated from the process placing real paper trades is the whole point of
+# running it as a separate process instead of in-process with lean-trader.
+#
+# Installation:
+#   sudo cp services/headline-news-pipeline.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable headline-news-pipeline   # start automatically on boot
+#   sudo systemctl start headline-news-pipeline    # start now
+#
+# IMPORTANT — same quirk as lean-web.service/lean-trader.service: the copy
+# in this repo (services/headline-news-pipeline.service) is NOT what systemd
+# actually reads. Any change here must be manually re-copied to
+# /etc/systemd/system/ and followed by `sudo systemctl daemon-reload` (and
+# usually `sudo systemctl restart headline-news-pipeline`) before it takes
+# effect on the Pi.
+#
+# Before first start, build the service and provision both credential files
+# (this service needs BOTH — Alpaca for news, Azure for LLM scoring):
+#   dotnet build services/HeadlineNewsPipeline/HeadlineNewsPipeline.csproj -c Release
+#   sudo mkdir -p /etc/tradingpi
+#   sudo cp config/alpaca_credentials.template /etc/tradingpi/alpaca.env   # if not already present for lean-trader
+#   sudo cp config/azure_credentials.template /etc/tradingpi/azure.env    # if not already present for lean-trader
+#   sudo chmod 600 /etc/tradingpi/alpaca.env /etc/tradingpi/azure.env
+#   sudo chown root:root /etc/tradingpi/alpaca.env /etc/tradingpi/azure.env
+# and provision this service's own persistent state directory (dedup
+# high-water mark + signals.jsonl output — see HighWaterMarkStore/
+# SignalWriter and DEVIATIONS.md for why this needs its own directory
+# distinct from /etc/tradingpi's credential-only role):
+#   sudo mkdir -p /var/lib/tradingpi/headline-news-pipeline
+#   sudo chown pi-admin:pi-admin /var/lib/tradingpi/headline-news-pipeline
+#
+# Management:
+#   sudo systemctl status headline-news-pipeline
+#   sudo journalctl -u headline-news-pipeline -f
+# =============================================================================
+
+[Unit]
+Description=Pi-AI-Trader Headline News Pipeline (Phase 2 AI Layer)
+Documentation=https://github.com/sdelvisco/Pi-AI-Trader
+
+# Start after the network is fully online — this service is useless without
+# it (both Alpaca and Azure calls require network access).
+After=network-online.target
+Wants=network-online.target
+
+# Limit to 5 restart attempts within a 5-minute window. A single poll
+# cycle's own failures (Alpaca network errors, Azure rate limits) are
+# already caught and logged inside the process without exiting — see
+# Program.cs's poll-loop try/catch — so a process-level exit here indicates
+# something more fundamental (e.g. a missing credential file), and this
+# still prevents a restart loop from hammering either API.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+User=pi-admin
+Group=pi-admin
+
+WorkingDirectory=/home/pi-admin/Pi-AI-Trader/services/HeadlineNewsPipeline/bin/Release/net10.0
+
+# -------------------------------------------------------------------------
+# Credentials — this service needs BOTH: alpaca.env for news access,
+# azure.env for LLM scoring. Same EnvironmentFile mechanism lean-trader.service
+# already uses for alpaca.env (see that unit file's header comment) and
+# lean-web.service already uses the "-" (optional-file) prefix convention
+# for; azure.env is not optional here, so no "-" prefix — a missing azure.env
+# should fail startup loudly (AzureLlmClient throws LlmConfigurationException)
+# rather than silently run with no LLM scoring.
+# -------------------------------------------------------------------------
+EnvironmentFile=/etc/tradingpi/alpaca.env
+EnvironmentFile=/etc/tradingpi/azure.env
+
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+Environment=DOTNET_NOLOGO=1
+
+Type=simple
+
+ExecStart=/usr/local/bin/dotnet /home/pi-admin/Pi-AI-Trader/services/HeadlineNewsPipeline/bin/Release/net10.0/HeadlineNewsPipeline.dll
+
+# Graceful stop: let the current poll cycle's in-flight HTTP call finish
+# rather than being killed mid-request.
+ExecStop=/bin/kill -TERM $MAINPID
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=30
+
+# -------------------------------------------------------------------------
+# Resource limits — this process makes occasional HTTP calls and does
+# lightweight JSON parsing; nowhere near LEAN's own resource footprint.
+# -------------------------------------------------------------------------
+MemoryMax=256M
+CPUQuota=25%
+
+# -------------------------------------------------------------------------
+# Security hardening
+# -------------------------------------------------------------------------
+NoNewPrivileges=true
+
+# Restrict write access to only this service's own persistent state
+# directory (dedup high-water mark + JSON-lines Signal output — see
+# HighWaterMarkStore/SignalWriter). Note: ProtectSystem=strict is
+# intentionally omitted, matching lean-web.service's own documented
+# reasoning — this is a local-only service on a dedicated trading Pi, and
+# the strict namespace sandbox has caused mount-namespace failures for
+# other services in this project when an expected ReadWritePaths directory
+# doesn't already exist at start time.
+ReadWritePaths=/var/lib/tradingpi/headline-news-pipeline
+
+# -------------------------------------------------------------------------
+# Logging
+# -------------------------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=headline-news-pipeline
+
+[Install]
+WantedBy=multi-user.target

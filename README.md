@@ -38,7 +38,10 @@ Pi-AI-Trader/
 │
 ├── services/                       # systemd unit files
 │   ├── lean-trader.service         # LEAN Engine live trading service
-│   └── lean-web.service            # Flask web interface service
+│   ├── lean-web.service            # Flask web interface service
+│   ├── headline-news-pipeline.service  # Headline news pipeline service (Phase 2 AI layer)
+│   ├── HeadlineNewsPipeline/       # Standalone headline-news pipeline (Phase 2 AI layer, step 2)
+│   └── HeadlineNewsPipeline.Tests/ # Unit tests for the above
 │
 ├── web/                            # Flask web dashboard
 │   ├── app.py                      # Application factory and entry point
@@ -59,7 +62,9 @@ Pi-AI-Trader/
 │   ├── csharp/
 │   │   ├── DualMomentumV2.cs       # Main trading strategy
 │   │   ├── DualMomentumV2.csproj   # Strategy project file
-│   │   └── bin/Release/net10.0/    # Compiled strategy DLLs
+│   │   ├── bin/Release/net10.0/    # Compiled strategy DLLs
+│   │   ├── Intelligence/           # Phase 2 AI layer: Signal/LlmSentimentModule/AzureLlmClient
+│   │   └── Intelligence.Tests/     # Unit tests for the above
 │   └── python/
 │       └── example_algorithm.py
 │
@@ -267,6 +272,19 @@ sudo cp config/notifications.template /etc/tradingpi/notifications.env
 sudo nano /etc/tradingpi/notifications.env   # fill in SMTP/Twilio credentials
 sudo chmod 600 /etc/tradingpi/notifications.env
 
+# Set up Azure AI Foundry credentials (needed by the headline news pipeline
+# service's LLM scoring — see services/headline-news-pipeline.service)
+sudo cp config/azure_credentials.template /etc/tradingpi/azure.env
+sudo nano /etc/tradingpi/azure.env           # fill in endpoint/key/deployment
+sudo chmod 600 /etc/tradingpi/azure.env
+sudo chown root:root /etc/tradingpi/azure.env
+
+# Persistent runtime state for the headline news pipeline (dedup high-water
+# mark + JSON-lines Signal output — distinct from /etc/tradingpi's
+# credential-only role)
+sudo mkdir -p /var/lib/tradingpi/headline-news-pipeline
+sudo chown pi-admin:pi-admin /var/lib/tradingpi/headline-news-pipeline
+
 # Generate a Flask secret key and add it
 FLASK_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
 echo "FLASK_SECRET_KEY=${FLASK_SECRET}" | sudo tee /etc/tradingpi/web.env > /dev/null
@@ -281,6 +299,7 @@ sudo chmod 600 /etc/tradingpi/web.env
 ```bash
 sudo cp services/lean-trader.service /etc/systemd/system/
 sudo cp services/lean-web.service    /etc/systemd/system/
+sudo cp services/headline-news-pipeline.service /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
 
@@ -310,6 +329,22 @@ sudo systemctl start lean-trader
 
 # Follow trading logs
 sudo journalctl -u lean-trader -f
+```
+
+### Start the headline news pipeline (Phase 2 AI layer)
+This is a standalone service, isolated by design from lean-trader/DualMomentumV2
+— see [`services/headline-news-pipeline.service`](services/headline-news-pipeline.service)
+for the full rationale. It does not affect live/paper trading; it only
+produces a `signals.jsonl` file for a future Signal Aggregator (not built
+yet) to consume.
+```bash
+dotnet build services/HeadlineNewsPipeline/HeadlineNewsPipeline.csproj -c Release
+
+sudo systemctl enable headline-news-pipeline
+sudo systemctl start headline-news-pipeline
+
+# Follow pipeline logs
+sudo journalctl -u headline-news-pipeline -f
 ```
 
 ---

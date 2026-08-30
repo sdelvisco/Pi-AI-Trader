@@ -71,6 +71,10 @@ strategies/csharp/bin/
 strategies/csharp/obj/
 strategies/csharp/*.user
 strategies/csharp/*.suo
+services/HeadlineNewsPipeline/bin/
+services/HeadlineNewsPipeline/obj/
+services/HeadlineNewsPipeline.Tests/bin/
+services/HeadlineNewsPipeline.Tests/obj/
 *.nupkg
 *.snupkg
 project.lock.json

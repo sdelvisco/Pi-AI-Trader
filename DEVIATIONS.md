@@ -940,4 +940,176 @@ The following cosmetic issues were resolved by updates to `web/templates/dashboa
   actually-thrown exception. Documented directly in that class's own doc comment as well, so
   a future reader doesn't need to rediscover this from LEAN's source again.
 
-*Last updated: 2026-08-22*
+## Headline News Pipeline (Phase 2 AI Layer, Step 2)
+
+### Known, accepted duplication: trading universe copied from DualMomentumV2.cs
+- **Date discovered:** 2026-08-28
+- **Reason:** This session builds `services/HeadlineNewsPipeline/`, a standalone service
+  deliberately isolated from `DualMomentumV2`/`lean-trader` (separate process, separate
+  failure domain — the LLM signal it produces hasn't been validated yet and must not be able
+  to affect live/paper trading). `DualMomentumV2.UniverseTickers` is a `private static
+  readonly string[]` field inside the algorithm class, so this new process has no way to read
+  it at runtime even if it wanted to.
+- **Change:** `services/HeadlineNewsPipeline/TickerUniverse.cs` copies the current
+  `UniverseTickers` contents verbatim (44 tickers as of this session — the prompt's own text
+  said 46, but the actual array in `DualMomentumV2.cs` was re-read directly per this session's
+  own instruction not to trust a prompt's cached description, and copied as found), with a
+  prominent comment stating it must be manually kept in sync.
+- **Impact — this is the known, accepted risk this session was told not to solve:** If
+  `DualMomentumV2.UniverseTickers` changes (a ticker added/removed), `TickerUniverse.Tickers`
+  in this new service will silently drift out of sync — headlines for a newly-added ticker
+  won't be scored, and headlines for a removed ticker will keep being scored, until someone
+  manually updates both lists. Extracting both to a single shared JSON/config file both
+  processes read is the correct fix and is explicitly out of scope for this session (per its
+  own prompt) — left as future work for whoever builds the Signal Aggregator or does other
+  Phase 2 hardening.
+
+### Alpaca News API: created_at field mis-typed as JTokenType.Date by Newtonsoft, not String
+- **Date discovered:** 2026-08-28
+- **Reason:** `AlpacaNewsClient.ParseArticle` originally required `created_at` to be
+  `JTokenType.String` before parsing it with `DateTime.TryParse`. This was caught by this
+  session's own build/test validation (see below) against realistic Alpaca-shaped JSON:
+  Newtonsoft's default `JsonTextReader` auto-detects ISO8601-looking string values during
+  parsing and converts them into `JTokenType.Date` tokens instead of leaving them as
+  `JTokenType.String` — so every real `created_at` value was being rejected as
+  "missing/unparseable", which would have made `AlpacaNewsClient` throw
+  `AlpacaResponseFormatException` on every single real Alpaca response.
+- **Change:** `AlpacaNewsClient.ParseResponseBody` now parses the response body via an
+  explicit `JsonTextReader` with `DateParseHandling = DateParseHandling.None`, keeping every
+  field exactly as Alpaca sent it, so `created_at` reliably stays a `JTokenType.String` that
+  this client parses itself with an explicit format/style — matching this project's
+  established "never guess/coerce, be explicit about parsing" pattern rather than trying to
+  special-case both `JTokenType.String` and `JTokenType.Date`.
+- **Caught by:** A unit test (`AlpacaNewsClientTests.GetNewsSinceAsync_MultiHeadlineResponse_ParsesAllFieldsAndSendsAuthHeaders`)
+  failing during this session's own build validation (see below), not by inspection — the
+  same "verify by actually running it" discipline the prior session's DEVIATIONS.md entry
+  ("Sandbox could not build against net10.0...") already established for this codebase.
+
+### Sandbox could not build against net10.0 or the real LEAN DLLs — validated against .NET 8 with stand-ins instead
+- **Date discovered:** 2026-08-28
+- **Reason:** Same sandbox limitation the prior session hit (see the identically-titled entry
+  under "Intelligence Layer (Phase 2)" above): no `/opt/lean-engine` in this sandbox, so the
+  real `HeadlineNewsPipeline.csproj`/`HeadlineNewsPipeline.Tests.csproj` (HintPath references
+  to `/opt/lean-engine/Launcher/bin/Release/{QuantConnect.Logging,Newtonsoft.Json}.dll`) could
+  not be built directly. Unlike the prior session, this sandbox's `apt-get install
+  dotnet-sdk-8.0` succeeded after an `apt-get update` (the prior session's attempt 404'd
+  before an update refreshed the package index) — so a real `dotnet build`/`dotnet test` run
+  (not just a code-reading review) was possible for the new code.
+- **Change:** Built a throwaway scratch project (outside this repo, in the session's
+  scratchpad — never committed) that compiles the real, unmodified
+  `strategies/csharp/Intelligence/*.cs`, `strategies/csharp/Intelligence.Tests/*.cs` (minus
+  the live smoke test), `services/HeadlineNewsPipeline/*.cs`, and
+  `services/HeadlineNewsPipeline.Tests/*.cs` source files against `net8.0`, using the same
+  kind of small local stand-in for `QuantConnect.Logging.Log`/`ILogHandler` the prior session
+  used, plus a real `Newtonsoft.Json` NuGet package. All 44 non-live unit tests passed (21
+  from the prior session's `Intelligence.Tests` + 23 new ones). Also ran the standalone
+  `HeadlineNewsPipeline` executable itself (not just its tests) against fake credentials in
+  this sandbox: it started, logged first-run seeding correctly, hit this sandbox's blocked
+  network egress when actually calling `data.alpaca.markets`, logged that failure clearly via
+  the intended `AlpacaRequestException` path, and — critically — did not crash, continuing to
+  wait for its next scheduled poll cycle, confirming `Program.cs`'s outer resilience `catch`
+  behaves as designed.
+- **Impact / what remains unverified:** As with the prior session's entry, the actual
+  committed `.csproj` files (targeting `net10.0` with real HintPath references) were never
+  built against the real LEAN output in this session — only this net8.0/stand-in equivalent
+  of the identical source code was. Run `dotnet build`/`dotnet test` for real on the Pi (or a
+  dev machine with LEAN built) before relying on this in production.
+
+### HeadlineNewsPipeline.csproj's QuantConnect.Logging.dll/Newtonsoft.Json.dll references deliberately omit `<Private>false</Private>`, unlike Intelligence.csproj's own references to the same two DLLs
+- **Date discovered:** 2026-08-28
+- **Reason:** `Intelligence.csproj` marks its `QuantConnect.Logging`/`Newtonsoft.Json` HintPath
+  references `<Private>false</Private>` (don't copy to output) because `Intelligence.dll` is
+  only ever loaded *inside* LEAN's own process, running from within
+  `/opt/lean-engine/Launcher/bin/Release/` where those DLLs already live. This new service is
+  the opposite case: a standalone executable, started directly by systemd from its own build
+  output directory (`services/HeadlineNewsPipeline/bin/Release/net10.0/`), which is never
+  inside LEAN's directory. If these references also used `Private=false`, the built
+  `HeadlineNewsPipeline.dll` would fail at startup with a missing-assembly error the first
+  time `LlmSentimentModule`/`AzureLlmClient` (both of which already call
+  `QuantConnect.Logging.Log` internally, regardless of anything this new project's own code
+  does) actually executed — this project's own use of `Newtonsoft.Json` for the JSON-lines
+  output would fail identically.
+- **Change:** Omitted `<Private>` entirely on both references in
+  `HeadlineNewsPipeline.csproj` (default is `true`/CopyLocal), so `dotnet build` copies both
+  DLLs into this project's own output directory alongside `HeadlineNewsPipeline.dll`.
+- **Impact:** Not independently confirmed against the real DLLs in this sandbox (no
+  `/opt/lean-engine` here — see the entry above); this is a reasoned build-configuration
+  choice based on how `Private`/CopyLocal semantics work, not something exercised end-to-end
+  with the real 20+ MB LEAN assemblies. Verify the built output directory actually contains
+  both DLLs after a real `dotnet build` on the Pi before deploying.
+
+### New convention: `/var/lib/tradingpi/` for persistent runtime state, distinct from `/etc/tradingpi/`'s credential-only role
+- **Date discovered:** 2026-08-28
+- **Reason:** This service needs to persist two things across restarts that are not
+  credentials: the ID-based dedup high-water mark (`state.json`) and the JSON-lines `Signal`
+  output (`signals.jsonl`) a future Signal Aggregator will read. This repo had no prior
+  convention for this — `/etc/tradingpi/` is used exclusively for root-owned, chmod-600
+  credential/config files (`alpaca.env`, `azure.env`, `notifications.env`, `web.env`), and
+  nothing in this repo previously needed a separate writable, service-owned state directory.
+- **Change:** Introduced `/var/lib/tradingpi/headline-news-pipeline/` (overridable via the
+  `HEADLINE_PIPELINE_STATE_DIR` environment variable, for local/dev/test use) as this
+  project's own state directory, documented in `services/headline-news-pipeline.service`'s
+  header comment, `README.md`'s Credentials Setup section, and `HighWaterMarkStore`'s/
+  `Program.cs`'s own doc comments. Manual `mkdir -p`/`chown` provisioning step, matching the
+  manual (not systemd `StateDirectory=`) style already established for `/etc/tradingpi/`.
+- **Impact:** Any future service in this repo needing similar persistent, non-credential
+  state should follow this same `/var/lib/tradingpi/<service-name>/` convention rather than
+  inventing a third pattern.
+
+### Alpaca News API parameter/response field names confirmed via search summaries, not a live call
+- **Date discovered:** 2026-08-28
+- **Reason:** This session's egress policy blocked direct fetches of `docs.alpaca.markets`
+  and `deepwiki.com` (same kind of block the prior session hit for `learn.microsoft.com` when
+  confirming Azure's auth header — see that entry above), so the exact `/v1beta1/news` query
+  parameter names (`symbols`, `start`, `sort`, `limit`, `page_token`, `include_content`,
+  `exclude_contentless`) and response field names (`id`, `headline`, `created_at`,
+  `updated_at`, `symbols`, `source`, `url`, `summary`, `content`, top-level `news` array,
+  `next_page_token`) were confirmed via web search result summaries and by fetching
+  `alpacahq/alpaca-py`'s own `NewsRequest`/`News`/`NewsSet` source from
+  `raw.githubusercontent.com` (not blocked), rather than by reading Alpaca's docs page
+  directly or making a real authenticated call against the live endpoint.
+- **Impact:** Not independently confirmed against a real live Alpaca News API response with
+  real credentials in this session (no real credentials available here regardless, matching
+  the prior session's equivalent Azure caveat). The parsing logic was validated against
+  realistic hand-constructed JSON matching this confirmed shape (see the `created_at` bug
+  entry above — that validation is exactly what caught a real defect), but if Alpaca's actual
+  live response shape differs from what search/source-code confirmation suggested, the fix is
+  localized to `AlpacaNewsClient.FetchPageAsync`/`ParseResponseBody`/`ParseArticle`.
+
+### README.md was missing azure.env credential setup entirely; filled the gap while documenting this service's own credentials
+- **Date discovered:** 2026-08-28
+- **Reason:** The prior session added `config/azure_credentials.template` and
+  `AzureLlmClient`'s own doc comments describing the `/etc/tradingpi/azure.env` setup, but
+  never added a corresponding step to `README.md`'s "Credentials Setup" section (confirmed via
+  direct search of `README.md` — zero mentions of "azure" before this session's edits). Since
+  this new service also requires `azure.env` (for LLM scoring, in addition to `alpaca.env` for
+  news) and its own deployment steps belong in the same README section per this session's own
+  instruction to document deployment "wherever `lean-web`'s equivalent steps are documented",
+  leaving `azure.env` undocumented there while adding this service's steps alongside it would
+  have been an inconsistent, confusing README.
+- **Change:** Added the `azure.env` setup step (copy template, fill in, chmod/chown) to
+  `README.md`'s Credentials Setup section, plus this service's own systemd install/start
+  steps to the Project Structure tree and "Running the Services" section, matching
+  `lean-trader`/`lean-web`'s existing documentation pattern.
+- **Impact:** Low-risk, low-scope documentation fix directly adjacent to this session's own
+  work — not a functional code change, and not going back to touch anything else the prior
+  session left undocumented.
+
+### Pi-AI-Trader.sln does not reference Intelligence.csproj/Intelligence.Tests.csproj/HeadlineNewsPipeline.csproj/HeadlineNewsPipeline.Tests.csproj
+- **Date discovered:** 2026-08-28
+- **Reason:** Confirmed the prior session never added `strategies/csharp/Intelligence/
+  Intelligence.csproj` or its test project to `Pi-AI-Trader.sln` either — the `.sln` only
+  lists `DualMomentumV2.csproj`. All of these projects build fine via direct `dotnet build
+  <path-to-csproj>` (the pattern every `.csproj` in this repo documents in its own header
+  comment) without being in the solution file; the `.sln` appears to exist mainly for
+  Visual Studio convenience around the one LEAN-loaded strategy project, not as the
+  authoritative build entry point for this repo's C# code.
+- **Change:** Left `Pi-AI-Trader.sln` untouched, matching the prior session's own precedent,
+  rather than unilaterally introducing solution-file maintenance as a new convention this
+  session wasn't asked to establish.
+- **Impact:** None currently — `make build`, `dotnet build <csproj>`, and `dotnet test
+  <csproj>` all remain the actual build/test entry points for every C# project in this repo,
+  solution file or not. Flagging this only so a future session doesn't assume the `.sln` is
+  an exhaustive project list.
+
+*Last updated: 2026-08-28*

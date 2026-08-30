@@ -1,0 +1,105 @@
+<!--
+  HeadlineNewsPipeline.csproj
+  ============================
+  Standalone console service (Phase 2 AI Layer, Step 2): polls Alpaca's News
+  API for headlines relevant to DualMomentumV2's trading universe, scores
+  each relevant headline/ticker pair via the existing
+  PiAiTrader.Intelligence.LlmSentimentModule, and appends the resulting
+  Signal objects to a local JSON-lines file for a future Signal Aggregator
+  (not built yet) to consume.
+
+  Deliberately its own process, not wired into DualMomentumV2/lean-trader in
+  any way — see this session's isolation rationale in DEVIATIONS.md.
+
+  To build:
+    dotnet build services/HeadlineNewsPipeline/HeadlineNewsPipeline.csproj -c Release
+
+  Output:
+    services/HeadlineNewsPipeline/bin/Release/net10.0/HeadlineNewsPipeline.dll
+
+  Not part of the `make build`/`make deploy` LEAN pipeline (that pipeline is
+  specific to DualMomentumV2's own build/deploy cycle) — see
+  services/headline-news-pipeline.service for this service's own deployment
+  steps.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Match the LEAN build's target framework and every other C# project
+         in this repo (see DEVIATIONS.md, ".NET 10 (not .NET 8)"). -->
+    <TargetFramework>net10.0</TargetFramework>
+
+    <!-- Unlike Intelligence.csproj (a library consumed only by LEAN, which
+         loads it from within LEAN's own bin dir), this is a standalone
+         executable run directly by systemd from its own build output
+         directory — it needs an actual entry point. -->
+    <OutputType>Exe</OutputType>
+
+    <AssemblyName>HeadlineNewsPipeline</AssemblyName>
+    <RootNamespace>PiAiTrader.HeadlineNewsPipeline</RootNamespace>
+
+    <OutputPath>bin/Release/</OutputPath>
+
+    <Deterministic>true</Deterministic>
+
+    <!-- Match DualMomentumV2.csproj/Intelligence.csproj's style: no
+         nullable annotations, no implicit global usings, explicit `using`
+         in every file. -->
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+
+    <!-- Docs are inline comments only, per project convention. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Pulls in Signal/SignalRequest/IIntelligenceModule/ILlmClient,
+         AzureLlmClient, and LlmSentimentModule — this project builds the
+         piece that feeds that library real data, per this session's scope. -->
+    <ProjectReference Include="../../strategies/csharp/Intelligence/Intelligence.csproj" />
+  </ItemGroup>
+
+  <!-- ======================================================================
+       Local LEAN DLL references (file-based HintPath, no NuGet packages —
+       same convention as Intelligence.csproj/DualMomentumV2.csproj).
+
+       Deliberately WITHOUT <Private>false</Private>, unlike Intelligence.csproj's
+       own references to these same two DLLs: Intelligence.dll only ever runs
+       loaded *inside* LEAN's own process (from within
+       /opt/lean-engine/Launcher/bin/Release/, where these DLLs already
+       live), so it doesn't need its own copy. This project is the opposite
+       case — a standalone executable that runs from its own build output
+       directory, never from inside LEAN's directory — so these DLLs must be
+       copied ("CopyLocal", the default when <Private> is omitted) into this
+       project's own output alongside HeadlineNewsPipeline.dll, or the
+       service fails to start with a missing-assembly error. See
+       DEVIATIONS.md.
+       ====================================================================== -->
+  <ItemGroup>
+
+    <!--
+      QuantConnect.Logging.dll
+      Used directly by this project's own code (Program.cs, PollCycleRunner,
+      AlpacaNewsClient, HighWaterMarkStore) for consistency with the rest of
+      this LEAN-based codebase's logging, and required transitively anyway
+      since Intelligence.dll's LlmSentimentModule/AzureLlmClient already call
+      into QuantConnect.Logging.Log internally.
+    -->
+    <Reference Include="QuantConnect.Logging">
+      <HintPath>/opt/lean-engine/Launcher/bin/Release/QuantConnect.Logging.dll</HintPath>
+    </Reference>
+
+    <!--
+      Newtonsoft.Json.dll
+      Used for the JSON-lines Signal output and the high-water-mark state
+      file, matching the JSON library already established throughout this
+      codebase (see Intelligence.csproj's own comment on this same
+      dependency).
+    -->
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>/opt/lean-engine/Launcher/bin/Release/Newtonsoft.Json.dll</HintPath>
+    </Reference>
+
+  </ItemGroup>
+
+</Project>
