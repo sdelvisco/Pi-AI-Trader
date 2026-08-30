@@ -63,6 +63,20 @@ def create_app() -> Flask:
         os.environ.get("LEAN_RESULTS_DIR", "/opt/lean-engine/Launcher/bin/Release")
     )
 
+    # Path to the shared Signal Aggregator mode config file (Phase 2, Step 3).
+    # DualMomentumV2.cs (strategies/csharp/DualMomentumV2.cs, via
+    # AggregatorConfigReader) reads this same absolute path fresh on every
+    # rebalance; this dashboard's Settings page writes it. Kept alongside
+    # the HeadlineNewsPipeline service's signals.jsonl output rather than a
+    # new dedicated directory, since that's already this project's one
+    # established shared-runtime-state location.
+    app.config["AGGREGATOR_CONFIG_PATH"] = Path(
+        os.environ.get(
+            "AGGREGATOR_CONFIG_PATH",
+            "/var/lib/tradingpi/headline-news-pipeline/aggregator-config.json",
+        )
+    )
+
     # -----------------------------------------------------------------------
     # Register blueprints
     # -----------------------------------------------------------------------

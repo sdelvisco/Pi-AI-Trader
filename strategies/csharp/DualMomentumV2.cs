@@ -36,6 +36,7 @@ using QuantConnect.Data;
 using QuantConnect.Data.Market;
 using QuantConnect.Brokerages;
 using QuantConnect.Orders;
+using PiAiTrader.Intelligence;
 
 #nullable enable
 
@@ -98,6 +99,34 @@ namespace PiAiTrader.Strategies
 
         /// <summary>Paper-trading seed capital (USD). Ignored by live brokerage.</summary>
         private const int SeedCash = 1_000;
+
+        // =====================================================================
+        // ██  SIGNAL AGGREGATOR (Phase 2, Step 3)  ───────────────────────────
+        // Sentiment-based position sizing WITHIN the existing top-N
+        // relative-momentum branch only -- never in the defensive branch,
+        // and never affecting which tickers the (untouched) momentum
+        // ranking selects. See PositionSizer for the sizing math and
+        // SignalsFileReader/AggregatorConfigReader for the fail-safe reads
+        // this all depends on. Every one of these three components is
+        // designed to degrade to "no adjustment" rather than throw, so a
+        // problem here can never block, delay, or crash a rebalance.
+        // =====================================================================
+
+        /// <summary>Path to the HeadlineNewsPipeline service's append-only
+        /// signal output. Matches services/HeadlineNewsPipeline/Program.cs's
+        /// DefaultStateDir + SignalsFileName exactly -- confirmed against
+        /// that file's actual current source, not assumed.</summary>
+        private const string SignalsFilePath = "/var/lib/tradingpi/headline-news-pipeline/signals.jsonl";
+
+        /// <summary>Path to the shared active-aggregation-mode config file,
+        /// written by the web portal's mode-selection control
+        /// (web/routes/api.py) and read fresh here on every rebalance. Lives
+        /// alongside signals.jsonl in the same existing
+        /// /var/lib/tradingpi/headline-news-pipeline/ directory rather than a
+        /// new dedicated path, since that's already this project's one
+        /// established shared-runtime-state location (no other such
+        /// location exists in the codebase to prefer instead).</summary>
+        private const string AggregatorConfigFilePath = "/var/lib/tradingpi/headline-news-pipeline/aggregator-config.json";
 
         // =====================================================================
         // ██  UNIVERSE DEFINITION  ────────────────────────────────────────────
@@ -210,6 +239,25 @@ namespace PiAiTrader.Strategies
         /// so that we only rebalance once per month (on the first trading day).
         /// </summary>
         private int _lastRebalanceMonth = -1;
+
+        /// <summary>
+        /// Reads recent HeadlineNewsPipeline signals for a symbol. Stateless
+        /// and safe to reuse across rebalances -- each call re-reads the
+        /// file fresh (see SignalsFileReader's own class comment on why no
+        /// caching/locking is needed here).
+        /// </summary>
+        private readonly SignalsFileReader _signalsFileReader = new SignalsFileReader(SignalsFilePath);
+
+        /// <summary>
+        /// Reads the active AggregationMode from the shared config file.
+        /// Deliberately re-read fresh at the start of every rebalance (never
+        /// cached) so a web-portal-driven mode change takes effect on the
+        /// very next rebalance without a lean-trader restart.
+        /// </summary>
+        private readonly AggregatorConfigReader _aggregatorConfigReader = new AggregatorConfigReader(AggregatorConfigFilePath);
+
+        /// <summary>Combines a ticker's recent signals into one AggregatedSignal.</summary>
+        private readonly ISignalAggregator _signalAggregator = new SignalAggregator();
 
         // =====================================================================
         // ██  INITIALIZE  ─────────────────────────────────────────────────────
@@ -469,15 +517,22 @@ namespace PiAiTrader.Strategies
             LiquidateAllExcept(topTickers);
 
             // ------------------------------------------------------------------
-            // D. ALLOCATE equal weight to each top-N symbol
+            // D. ALLOCATE to each top-N symbol, using sentiment-adjusted
+            //    weights within the existing top-N branch only (see
+            //    ComputeSentimentAdjustedWeights). This NEVER changes which
+            //    tickers are selected (topTickers above is untouched) --
+            //    only how much capital goes to each one already selected.
             // ------------------------------------------------------------------
+            var tickerWeights = ComputeSentimentAdjustedWeights(topTickers);
+
             foreach (var ticker in topTickers)
             {
                 var sym = _symbols[ticker];
+                var weight = tickerWeights.GetValueOrDefault(ticker, PositionWeight);
                 // Use an explicit MarketOrder/MarketOnCloseOrder instead of
                 // SetHoldings() so that the Day TimeInForce on
                 // DefaultOrderProperties is respected.
-                // Target quantity = PositionWeight × TotalPortfolioValue / Price.
+                // Target quantity = weight × TotalPortfolioValue / Price.
                 // Subtract the current held quantity to get only the incremental
                 // order needed (mirrors what SetHoldings() does internally).
                 // The scheduled monthly rebalance submits MarketOnCloseOrder()
@@ -485,7 +540,7 @@ namespace PiAiTrader.Strategies
                 // an immediate MarketOrder() instead.
                 if (Securities.ContainsKey(sym) && Securities[sym].Price > 0)
                 {
-                    var targetQty = (long)(PositionWeight * Portfolio.TotalPortfolioValue / Securities[sym].Price);
+                    var targetQty = (long)(weight * Portfolio.TotalPortfolioValue / Securities[sym].Price);
                     var delta     = targetQty - (long)Portfolio[sym].Quantity;
                     if (delta != 0)
                     {
@@ -497,10 +552,87 @@ namespace PiAiTrader.Strategies
                     //  initialisation in case OnOrderEvent is delayed.)
                     _entryPrices[sym] = Securities[sym].Price;
                 }
-                Log($"[Allocate] {ticker} → {PositionWeight:P0} (entry ~${_entryPrices.GetValueOrDefault(sym, 0):F2})");
+                Log($"[Allocate] {ticker} → {weight:P1} (base {PositionWeight:P0}, entry ~${_entryPrices.GetValueOrDefault(sym, 0):F2})");
             }
 
-            Log($"[Rebalance] Complete. Portfolio target: {string.Join(", ", topTickers.Select(t => $"{t}@{PositionWeight:P0}"))}");
+            Log($"[Rebalance] Complete. Portfolio target: {string.Join(", ", topTickers.Select(t => $"{t}@{tickerWeights.GetValueOrDefault(t, PositionWeight):P1}"))}");
+        }
+
+        // =====================================================================
+        // ██  SENTIMENT-ADJUSTED POSITION SIZING  ────────────────────────────
+        // =====================================================================
+
+        /// <summary>
+        /// Computes each top-N ticker's sentiment-adjusted weight, for use
+        /// ONLY within the risk-on top-N allocation branch of Rebalance() --
+        /// never called from the defensive (100% AGG) path.
+        ///
+        /// THE MOST IMPORTANT PROPERTY OF THIS METHOD: it can never throw,
+        /// block, or meaningfully delay a rebalance. Every step below --
+        /// reading the active mode, reading signals.jsonl per ticker,
+        /// aggregating, and sizing -- is already individually fail-safe
+        /// (AggregatorConfigReader/SignalsFileReader never throw by
+        /// contract, and PositionSizer is pure in-memory math), but this
+        /// method wraps the entire sequence in one more try/catch anyway, so
+        /// that even an unanticipated bug in any of those components still
+        /// can't do worse than fall back to exact equal weight -- identical
+        /// to this strategy's pre-session behavior.
+        /// </summary>
+        private Dictionary<string, decimal> ComputeSentimentAdjustedWeights(List<string> topTickers)
+        {
+            // Computed up front and used as both the immediate return value
+            // on any failure AND the base weight fed into PositionSizer --
+            // this is exactly today's pre-session equal-weight allocation.
+            var fallback = topTickers.ToDictionary(t => t, t => PositionWeight);
+
+            try
+            {
+                var mode = _aggregatorConfigReader.ReadActiveMode();
+                var nowUtc = DateTime.UtcNow;
+
+                var signalsByTicker = new Dictionary<string, AggregatedSignal>();
+                foreach (var ticker in topTickers)
+                {
+                    var recentSignals = _signalsFileReader.ReadRecentSignals(ticker, nowUtc);
+                    signalsByTicker[ticker] = _signalAggregator.Aggregate(ticker, recentSignals, mode);
+                }
+
+                var adjustedWeights = PositionSizer.ComputeAdjustedWeights(
+                    topTickers, (double)PositionWeight, signalsByTicker, mode);
+
+                var result = new Dictionary<string, decimal>();
+                foreach (var ticker in topTickers)
+                {
+                    result[ticker] = (decimal)adjustedWeights[ticker];
+                }
+
+                // Per-rebalance summary log: mode, each ticker's base vs.
+                // adjusted weight, and how many signals contributed --
+                // reviewable after the fact without digging through raw
+                // signal data, per this session's explicit requirement.
+                Log($"[SignalAggregator] Active mode: {mode}");
+                foreach (var ticker in topTickers)
+                {
+                    var agg = signalsByTicker[ticker];
+                    Log($"[SignalAggregator] {ticker}: base={PositionWeight:P1} adjusted={result[ticker]:P1} " +
+                        $"signals={agg.ContributingSignalCount} score={agg.CombinedScore:F2} confidence={agg.CombinedConfidence:F2}");
+                }
+
+                return result;
+            }
+            catch (Exception ex)
+            {
+                // Any failure anywhere above -- config read, signals read,
+                // aggregation, or sizing -- falls back to exact equal
+                // weight. Logged as an error (not just a warning) since
+                // reaching this catch means one of the individually
+                // fail-safe components above didn't behave as designed and
+                // is worth investigating, even though the rebalance itself
+                // proceeds safely regardless.
+                Error($"[SignalAggregator] Failed to compute sentiment-adjusted weights — " +
+                      $"falling back to equal weight for all top-N positions. {ex.Message}");
+                return fallback;
+            }
         }
 
         // =====================================================================

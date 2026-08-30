@@ -30,6 +30,30 @@
         </table>
     </div>
 </div>
+
+<h5 class="mt-4 mb-3"><i class="bi bi-sliders"></i> Signal Aggregator</h5>
+<div class="card bg-black border-secondary">
+    <div class="card-body">
+        <p class="text-muted-light">
+            Controls how DualMomentumV2 combines recent LLM headline-sentiment
+            signals into position-size adjustments for each rebalance's
+            already-selected top-N tickers (a ±50% swing around each
+            position's equal weight). This never changes which tickers are
+            selected. Takes effect on the very next rebalance — no restart
+            needed.
+        </p>
+        <div class="row align-items-center">
+            <label for="aggregator-mode-select" class="col-auto col-form-label text-muted-light">Active mode</label>
+            <div class="col-auto">
+                <select id="aggregator-mode-select" class="form-select form-select-sm bg-dark text-light border-secondary">
+                </select>
+            </div>
+            <div class="col-auto">
+                <span id="aggregator-mode-status" class="small text-muted-light"></span>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -40,5 +64,42 @@ fetch("/api/status")
         document.getElementById("setting-paper").textContent =
             data.paper_trading === "true" ? "Yes (paper money)" : "No (live money)";
     });
+
+const modeSelect = document.getElementById("aggregator-mode-select");
+const modeStatus = document.getElementById("aggregator-mode-status");
+
+fetch("/api/aggregator-mode")
+    .then(r => r.json())
+    .then(data => {
+        modeSelect.innerHTML = "";
+        (data.available_modes || []).forEach(mode => {
+            const opt = document.createElement("option");
+            opt.value = mode;
+            opt.textContent = mode;
+            if (mode === data.active_mode) opt.selected = true;
+            modeSelect.appendChild(opt);
+        });
+    })
+    .catch(() => {
+        modeStatus.textContent = "Failed to load current mode.";
+    });
+
+modeSelect.addEventListener("change", () => {
+    modeStatus.textContent = "Saving...";
+    fetch("/api/aggregator-mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: modeSelect.value }),
+    })
+        .then(r => r.json())
+        .then(data => {
+            modeStatus.textContent = data.status === "ok"
+                ? `Active mode set to ${data.active_mode}.`
+                : `Error: ${data.message}`;
+        })
+        .catch(() => {
+            modeStatus.textContent = "Failed to save mode.";
+        });
+});
 </script>
 {% endblock %}

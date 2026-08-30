@@ -134,4 +134,23 @@
 
   </ItemGroup>
 
+  <!-- ======================================================================
+       Signal Aggregator (Phase 2, Step 3) — AggregationMode, AggregatedSignal,
+       ISignalAggregator/SignalAggregator, SignalsFileReader,
+       AggregatorConfigReader, PositionSizer. A standard ProjectReference (not
+       a HintPath) since Intelligence.csproj is part of this same repo/build,
+       not a LEAN engine assembly. NOTE FOR DEPLOYMENT: unlike the HintPath
+       references above (Private=false, already present in LEAN's own release
+       output), this ProjectReference copies PiAiTrader.Intelligence.dll into
+       this project's own build output directory (bin/Release/net10.0/)
+       alongside DualMomentumV2.dll — the Makefile's `deploy` target must also
+       copy that DLL to LEAN's release directory, or DualMomentumV2.dll will
+       fail to load at runtime with a missing-assembly error the moment it
+       touches any PiAiTrader.Intelligence type. See the Makefile's `deploy`
+       target for the corresponding copy step.
+       ====================================================================== -->
+  <ItemGroup>
+    <ProjectReference Include="Intelligence/Intelligence.csproj" />
+  </ItemGroup>
+
 </Project>
