@@ -1112,4 +1112,161 @@ The following cosmetic issues were resolved by updates to `web/templates/dashboa
   solution file or not. Flagging this only so a future session doesn't assume the `.sln` is
   an exhaustive project list.
 
-*Last updated: 2026-08-28*
+---
+
+## Signal Aggregator + Live Position-Sizing Wiring (Phase 2, Step 3)
+
+### This session had no `dotnet` SDK, no LEAN engine checkout, and no network access to fetch either — code is unverified by any compiler
+- **Date discovered:** 2026-08-30
+- **Reason:** Unlike prior Phase 2 sessions (which at least ran `dotnet build`/`dotnet test`
+  locally against a real `net10.0` SDK), this session's sandbox had no `dotnet` binary
+  installed, and both `apt-get install dotnet-sdk-8.0` and the official
+  `dotnet-install.sh` script (`https://dot.net/v1/dotnet-install.sh`) failed — the former
+  with `404 Not Found` on every package (no matching repo mirror available), the latter
+  with the outbound agent proxy returning `403`/`connect_rejected` for
+  `builds.dotnet.microsoft.com`. `/opt/lean-engine` (the source of every `HintPath`
+  reference in this repo's `.csproj` files, per this project's established convention) does
+  not exist in this sandbox either. Net effect: none of the new or modified C# in this
+  session — `strategies/csharp/Intelligence/{AggregationMode,AggregatedSignal,
+  ISignalAggregator,SignalAggregator,SignalsFileReader,AggregatorConfig,
+  AggregatorConfigReader,PositionSizer}.cs`, the `DualMomentumV2.cs` wiring, or any of the
+  four new test files — has been compiled or run by this session. Everything was written
+  and manually re-read line-by-line against the existing code style and the actual current
+  shape of `Signal`/`SignalDirection`/`IIntelligenceModule` (re-read fresh from source
+  before writing anything depending on them, per this session's prompt), but that is not a
+  substitute for a real build.
+- **Impact:** This is exactly the scenario the prompt's "Real Pi build verification"
+  section anticipates and requires before merging — restated here because this session's
+  case for it is stronger than either prior session's (which at least had *some* local
+  compiler feedback). Required before this goes anywhere near a real rebalance:
+  `dotnet build strategies/csharp/DualMomentumV2.csproj -c Release` (now pulls in the new
+  `Intelligence.csproj` ProjectReference — see the next entry) and
+  `dotnet test strategies/csharp/Intelligence.Tests/Intelligence.Tests.csproj` on the real
+  Pi, plus the specific fail-safe smoke test the prompt calls out: temporarily rename
+  `/var/lib/tradingpi/headline-news-pipeline/signals.jsonl` and confirm
+  `make force-rebalance` still produces the exact pre-session equal-weight allocation.
+
+### `DualMomentumV2.csproj` needed a `ProjectReference` to `Intelligence.csproj`, which the `deploy` Make target didn't know to copy
+- **Date discovered:** 2026-08-30
+- **Reason:** This session is the first to make `DualMomentumV2.cs` depend on
+  `PiAiTrader.Intelligence` types (`SignalAggregator`, `SignalsFileReader`,
+  `AggregatorConfigReader`, `PositionSizer`, `AggregatedSignal`, `AggregationMode`).
+  Re-read `DualMomentumV2.csproj` before touching it (per this session's prompt) and
+  confirmed every existing reference is a `HintPath` pointing at
+  `/opt/lean-engine/Launcher/bin/Release/*.dll` with `Private=false` — i.e. "this DLL is
+  already sitting in LEAN's own release output, don't copy it, just link against it."
+  `Intelligence.csproj` is not a LEAN assembly; it needed an ordinary `ProjectReference`
+  instead, which behaves differently — by default it copies the referenced project's build
+  output (`PiAiTrader.Intelligence.dll`) into the *referencing* project's own output
+  directory (`strategies/csharp/bin/Release/net10.0/`), same as `Intelligence.Tests.csproj`
+  already does for its own `ProjectReference` to `Intelligence.csproj`. Re-read the
+  `Makefile`'s `deploy` target and found it copies exactly one hardcoded file
+  (`$(BUILD_OUTPUT)` → `$(DEPLOY_DIR)/$(DLL_NAME)`, i.e. only `DualMomentumV2.dll`) to
+  LEAN's release directory — it had no way to know a second DLL now needs to travel with
+  it. Left uncorrected, `make deploy` would copy a `DualMomentumV2.dll` that immediately
+  fails to load at runtime the moment LEAN resolves any `PiAiTrader.Intelligence` type
+  reference, since `PiAiTrader.Intelligence.dll` would never reach
+  `/opt/lean-engine/Launcher/bin/Release/`.
+- **Change:** Added `<ProjectReference Include="Intelligence/Intelligence.csproj" />` to
+  `DualMomentumV2.csproj` (with an inline comment explaining the HintPath-vs-ProjectReference
+  distinction for the next reader). Added `INTELLIGENCE_DLL_NAME`/
+  `INTELLIGENCE_BUILD_OUTPUT` variables to the `Makefile` and a matching `sudo cp` step in
+  `deploy` (immediately after the existing `DualMomentumV2.dll` copy), plus an existence
+  check for the new DLL in `build` (mirroring the existing check for `DualMomentumV2.dll`).
+  Also added the corresponding `NOPASSWD` sudoers line to the `Makefile`'s header comment
+  (a real Pi's `/etc/sudoers.d/pi-admin-lean` file will need this line added manually before
+  `make deploy` can copy the new DLL — this session cannot edit sudoers on a real Pi it has
+  no access to).
+- **Verification:** Pending — needs the real-Pi build/deploy verification described in the
+  entry above, specifically confirming `PiAiTrader.Intelligence.dll` actually lands in
+  `/opt/lean-engine/Launcher/bin/Release/` after `make deploy` and that `lean-trader`
+  restarts cleanly afterward (watch for a missing-assembly/type-load error in
+  `journalctl -u lean-trader`, which is exactly what this fix exists to prevent).
+
+### `AggregatedSignal.ContributingSignalCount` semantics for ConsensusOnly's disagreement path
+- **Date discovered:** 2026-08-30
+- **Reason:** The prompt's `AggregatedSignal.ContributingSignalCount` doc comment says
+  "zero is a valid, expected value (no recent signals for this symbol)" and position-sizing
+  step 7 keys an unadjusted-exact-base-weight fallback off `ContributingSignalCount == 0`.
+  It does not explicitly say what this field should hold when ConsensusOnly forces a
+  Neutral/zero result due to disagreement among signals that DID exist. Two readings
+  seemed plausible: (a) `0`, since the forced result is "zero score, zero confidence,
+  Neutral" and treating it identically to "no signals" would be the simplest way to make
+  `PositionSizer` skip it entirely; or (b) the real input count, since signals genuinely
+  existed and were considered — disagreement is a different, still-contributing scenario
+  from an empty input.
+- **Change:** Chose (b): `ContributingSignalCount` always equals the number of signals fed
+  into `Aggregate()` for every mode, including ConsensusOnly's forced-neutral path — only a
+  literally empty (or null) input produces `0`. Reasoning: a ticker with real, disagreeing
+  news coverage is a materially different situation from a ticker with no news coverage at
+  all, and collapsing them into the same `ContributingSignalCount == 0` fallback in
+  `PositionSizer` would erase that distinction in the per-rebalance log (`signals=0` reading
+  identically for both "no news" and "conflicting news"). In practice this is a no-op on
+  the resulting weight either way — `PositionSizer`'s raw adjustment is
+  `CombinedScore x CombinedConfidence`, which is `0 x 0 = 0` for a forced-neutral result
+  regardless of which reading was chosen — but it does change which fail-safe path a
+  disagreement-driven ticker takes internally (participates in the active-ticker
+  renormalization pool with a zero adjustment, vs. being pulled out into the
+  fixed-exact-base-weight pool), and changes what the per-rebalance summary log reports for
+  that ticker. `PositionSizerTests.ComputeAdjustedWeights_MixOfActiveTickers_RenormalizedSumEqualsOriginalTotal`
+  and the `SignalAggregatorTests.ConsensusOnly_*` tests both encode this choice explicitly,
+  so a future session that disagrees with it has a clear point to revisit.
+
+### Signal symbol matching in `SignalsFileReader` is case-insensitive
+- **Date discovered:** 2026-08-30
+- **Reason:** `services/HeadlineNewsPipeline/PollCycleRunner.cs` matches tickers against
+  `TickerUniverse.Tickers` using `StringComparer.Ordinal` (case-sensitive), and this
+  project's tickers are written/read as uppercase throughout. A case-sensitive match would
+  have been equally correct for every signal this pipeline actually produces today.
+- **Change:** `SignalsFileReader.ReadRecentSignals()` matches `Signal.Symbol` against the
+  requested ticker via `StringComparison.OrdinalIgnoreCase` instead, as a deliberate,
+  low-cost defensive choice — given this session's overriding priority that a signals-file
+  read must never be the reason a ticker's real recent signals go silently unmatched, a
+  case mismatch (e.g. a future signal source that happens to emit lowercase symbols)
+  degrading to "no adjustment for that ticker" instead of throwing or being invisibly wrong
+  seemed worth the negligible risk of ever over-matching. Not expected to change behavior
+  against the current `HeadlineNewsPipeline` output, which is uppercase already.
+
+### Position-sizing renormalization: zero-signal tickers are excluded from the renormalization pool, not merely from the adjustment
+- **Date discovered:** 2026-08-30
+- **Reason:** The prompt's position-sizing step 6 ("renormalize the N adjusted weights so
+  they sum to the same total as the N un-adjusted equal weights would have") and step 7
+  ("a zero-signal ticker's weight must be its exact original equal weight, unadjusted --
+  and it should still participate correctly in the renormalization step for the other
+  tickers") are in tension if renormalization is implemented as one uniform scale factor
+  across all N tickers: uniformly rescaling every ticker's weight to hit the total-sum
+  target would also rescale a zero-signal ticker fractionally away from its exact original
+  weight, contradicting "exact."
+- **Change:** `PositionSizer.ComputeAdjustedWeights()` resolves this by never letting a
+  zero-signal ticker's weight participate in the renormalization math at all: its weight is
+  assigned `baseWeight` directly and is excluded from the pool of weights that get scaled.
+  The *budget* reserved for it (`zeroSignalCount x baseWeight`) is still subtracted out of
+  the total before computing the scale factor for the remaining active tickers
+  (`activeBudget = activeTickers.Count x baseWeight`), which is what "participate correctly
+  in the renormalization step" is read to mean here — the other tickers' adjustments are
+  renormalized against the capital actually still available to them, not against the full
+  N x baseWeight total as if the zero-signal ticker's weight were still free to move. This
+  satisfies both step 6 (grand total across all N tickers is unchanged) and step 7 (exact,
+  not approximate, equality) simultaneously.  See
+  `PositionSizerTests.ComputeAdjustedWeights_ZeroSignalTickerAmongActiveTickers_KeepsExactOriginalWeight`.
+
+### Shared aggregator mode config file location
+- **Date discovered:** 2026-08-30
+- **Reason:** The prompt named `/var/lib/tradingpi/headline-news-pipeline/aggregator-config.json`
+  as an example path but asked this session to check for a more sensible existing shared
+  location first. Searched the repo (`web/app.py`'s existing config-path conventions,
+  `services/HeadlineNewsPipeline/Program.cs`'s `DefaultStateDir`, and everywhere else a
+  `/var/lib/tradingpi/...`-style path appears) and found no other established
+  shared-runtime-state directory this project already uses — `/var/lib/tradingpi/headline-news-pipeline/`
+  (via `HeadlineNewsPipeline/Program.cs`'s `DefaultStateDir`) is the only one that exists.
+- **Change:** Used the prompt's own suggested path as-is:
+  `/var/lib/tradingpi/headline-news-pipeline/aggregator-config.json`, alongside
+  `signals.jsonl` in that same directory. Both `AggregatorConfigReader`
+  (`strategies/csharp/Intelligence/AggregatorConfigReader.cs`, read by `DualMomentumV2.cs`)
+  and the new Flask endpoints (`web/routes/api.py`'s `aggregator_mode_get`/
+  `aggregator_mode_post`, via `web/app.py`'s new `AGGREGATOR_CONFIG_PATH` config key,
+  overridable by an `AGGREGATOR_CONFIG_PATH` environment variable matching the existing
+  `LEAN_RESULTS_DIR` override convention) point at this same absolute path independently
+  (no shared constant across the Python/C# language boundary was possible here).
+
+*Last updated: 2026-08-30*

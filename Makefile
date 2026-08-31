@@ -12,6 +12,7 @@
 #   - LEAN installation: /opt/lean-engine/Launcher/bin/Release/
 #   - Passwordless sudo for pi-admin (add to /etc/sudoers.d/pi-admin-lean):
 #       pi-admin ALL=(ALL) NOPASSWD: /bin/cp /home/pi-admin/Pi-AI-Trader/strategies/csharp/bin/Release/net10.0/DualMomentumV2.dll /opt/lean-engine/Launcher/bin/Release/DualMomentumV2.dll
+#       pi-admin ALL=(ALL) NOPASSWD: /bin/cp /home/pi-admin/Pi-AI-Trader/strategies/csharp/bin/Release/net10.0/PiAiTrader.Intelligence.dll /opt/lean-engine/Launcher/bin/Release/PiAiTrader.Intelligence.dll
 #       pi-admin ALL=(ALL) NOPASSWD: /usr/bin/python3 /home/pi-admin/Pi-AI-Trader/scripts/render_lean_config.py *
 #       pi-admin ALL=(ALL) NOPASSWD: /bin/systemctl restart lean-trader
 #       pi-admin ALL=(ALL) NOPASSWD: /bin/systemctl start lean-trader
@@ -27,6 +28,16 @@ DLL_NAME     := DualMomentumV2.dll
 BUILD_DIR    := $(STRATEGY_DIR)/bin/Release/net10.0
 BUILD_OUTPUT := $(BUILD_DIR)/$(DLL_NAME)
 DEPLOY_DIR   := /opt/lean-engine/Launcher/bin/Release
+# Phase 2 Step 3 (Signal Aggregator): DualMomentumV2.csproj now carries a
+# ProjectReference to strategies/csharp/Intelligence/Intelligence.csproj, so
+# `dotnet build` copies PiAiTrader.Intelligence.dll into BUILD_DIR alongside
+# DualMomentumV2.dll. That second DLL must be deployed too -- LEAN loads
+# DualMomentumV2.dll on its own, and without PiAiTrader.Intelligence.dll
+# sitting next to it in DEPLOY_DIR, the algorithm fails to load the moment it
+# touches any PiAiTrader.Intelligence type (SignalAggregator, PositionSizer,
+# etc).
+INTELLIGENCE_DLL_NAME := PiAiTrader.Intelligence.dll
+INTELLIGENCE_BUILD_OUTPUT := $(BUILD_DIR)/$(INTELLIGENCE_DLL_NAME)
 # LEAN reads config.json from the same directory as its own executable, not
 # from Launcher/ one level up: WorkingDirectory and ExecStart in
 # /etc/systemd/system/lean-trader.service both point at
@@ -61,7 +72,13 @@ build:
 		echo "       Check build output above for errors."; \
 		exit 1; \
 	}
+	@test -f "$(INTELLIGENCE_BUILD_OUTPUT)" || { \
+		echo "ERROR: Expected DLL not found at $(INTELLIGENCE_BUILD_OUTPUT)"; \
+		echo "       Check build output above for errors."; \
+		exit 1; \
+	}
 	@echo "Build OK: $(BUILD_OUTPUT)"
+	@echo "Build OK: $(INTELLIGENCE_BUILD_OUTPUT)"
 
 # -----------------------------------------------------------------------------
 # deploy: copy DLL, verify config.json, restart lean-trader service
@@ -77,6 +94,8 @@ build:
 deploy:
 	@echo "==> Deploying $(DLL_NAME) to $(DEPLOY_DIR)..."
 	sudo cp "$(BUILD_OUTPUT)" "$(DEPLOY_DIR)/$(DLL_NAME)"
+	@echo "==> Deploying $(INTELLIGENCE_DLL_NAME) to $(DEPLOY_DIR)..."
+	sudo cp "$(INTELLIGENCE_BUILD_OUTPUT)" "$(DEPLOY_DIR)/$(INTELLIGENCE_DLL_NAME)"
 	@echo "==> Rendering config template (substituting \$${VAR} credential placeholders) to $(LEAN_CONFIG)..."
 	sudo python3 scripts/render_lean_config.py config/lean_config.template.json $(CREDENTIALS_ENV) $(LEAN_CONFIG)
 	@echo "==> Verifying $(LEAN_CONFIG)..."

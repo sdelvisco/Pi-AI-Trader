@@ -13,6 +13,8 @@ Endpoints:
   POST /api/control/pause    — pause the trading algorithm
   POST /api/control/resume   — resume a paused algorithm
   POST /api/control/stop     — emergency stop (graceful shutdown)
+  GET  /api/aggregator-mode  — current Signal Aggregator active mode
+  POST /api/aggregator-mode  — set the Signal Aggregator active mode
 """
 
 import os
@@ -42,6 +44,18 @@ def _read_json_safe(path: Path) -> dict | list | None:
             return json.load(fh)
     except (FileNotFoundError, json.JSONDecodeError, PermissionError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Signal Aggregator mode control (Phase 2, Step 3)
+#
+# Mirrors the C# side exactly: PiAiTrader.Intelligence.AggregationMode
+# (strategies/csharp/Intelligence/AggregationMode.cs) and
+# AggregatorConfigReader's DefaultMode.
+# ---------------------------------------------------------------------------
+
+AGGREGATOR_MODES = ["WeightedVote", "ConfidenceWeighted", "ConsensusOnly", "CapitalSplit"]
+AGGREGATOR_DEFAULT_MODE = "CapitalSplit"
 
 
 # ---------------------------------------------------------------------------
@@ -463,3 +477,67 @@ def control_stop():
             ), 500
     except subprocess.TimeoutExpired:
         return jsonify({"status": "error", "message": "Stop command timed out"}), 500
+
+
+# ---------------------------------------------------------------------------
+# Signal Aggregator mode endpoints (Phase 2, Step 3)
+# ---------------------------------------------------------------------------
+
+@api_bp.route("/aggregator-mode", methods=["GET"])
+def aggregator_mode_get():
+    """
+    Returns the currently active Signal Aggregator mode plus the list of
+    all valid modes (for populating the dropdown).
+
+    Reads the same shared config file DualMomentumV2.cs reads fresh on
+    every rebalance (via AggregatorConfigReader). Mirrors that reader's own
+    fail-safe fallback here too: a missing/empty/malformed/unrecognized
+    config reports AGGREGATOR_DEFAULT_MODE rather than erroring, so the
+    dashboard never breaks over a config-file problem either.
+    """
+    config_path = current_app.config["AGGREGATOR_CONFIG_PATH"]
+    data = _read_json_safe(config_path)
+
+    active_mode = AGGREGATOR_DEFAULT_MODE
+    if isinstance(data, dict):
+        candidate = data.get("ActiveMode")
+        if candidate in AGGREGATOR_MODES:
+            active_mode = candidate
+
+    return jsonify({"active_mode": active_mode, "available_modes": AGGREGATOR_MODES})
+
+
+@api_bp.route("/aggregator-mode", methods=["POST"])
+def aggregator_mode_post():
+    """
+    Sets the active Signal Aggregator mode by writing it to the shared
+    config file. DualMomentumV2 picks this up on its very next rebalance
+    (it re-reads the file fresh every time, never cached) -- no
+    lean-trader restart required.
+    """
+    body = request.get_json(silent=True) or {}
+    mode = body.get("mode")
+
+    if mode not in AGGREGATOR_MODES:
+        return jsonify(
+            {
+                "status": "error",
+                "message": f"Invalid mode {mode!r}. Must be one of: {', '.join(AGGREGATOR_MODES)}",
+            }
+        ), 400
+
+    config_path = current_app.config["AGGREGATOR_CONFIG_PATH"]
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        # Write-to-temp-then-rename, same atomicity approach the C# side's
+        # HighWaterMarkStore.Save() uses for its own state file, so a
+        # concurrent DualMomentumV2 rebalance reading this file mid-write
+        # never observes a torn/partial config file.
+        tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump({"ActiveMode": mode}, fh)
+        tmp_path.replace(config_path)
+    except OSError as exc:
+        return jsonify({"status": "error", "message": f"Failed to write config: {exc}"}), 500
+
+    return jsonify({"status": "ok", "active_mode": mode})
