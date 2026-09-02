@@ -1269,4 +1269,85 @@ The following cosmetic issues were resolved by updates to `web/templates/dashboa
   `LEAN_RESULTS_DIR` override convention) point at this same absolute path independently
   (no shared constant across the Python/C# language boundary was possible here).
 
-*Last updated: 2026-08-30*
+### Monthly rebalance orders rejected: MarketOnCloseOrder() submitted 4 seconds after LEAN's default cutoff
+- **Date discovered:** 2026-09-01 (fix applied 2026-09-02)
+- **Symptom:** The scheduled monthly rebalance (`Schedule.On(DateRules.MonthStart(...),
+  TimeRules.At(15, 45), ...)`, `strategies/csharp/DualMomentumV2.cs`) fired on schedule on
+  2026-09-01, computed a full target portfolio, and called `MarketOnCloseOrder()` for every
+  target position — but every single order was rejected. Live log evidence from the Pi:
+  ```
+  2026-09-01T19:45:05.9035932Z ERROR:: 2026-09-01 15:45:04 MarketOnClose orders must be
+  placed within 00:15:30 before market close. Override this TimeSpan buffer by setting
+  Orders.MarketOnCloseOrder.SubmissionTimeBuffer in QCAlgorithm.Initialize().
+  ```
+  Zero orders reached Alpaca that day. The dashboard correctly showed no portfolio change,
+  since nothing had actually traded — but the algorithm's own log still printed
+  `[Rebalance] Complete. Portfolio target: ...` immediately after the rejection, which is
+  misleading: that line logs the *computed* target portfolio, not confirmed order
+  acceptance, so it read as if the rebalance had succeeded when in fact no order was
+  accepted.
+- **Root cause:** LEAN's default `MarketOnCloseOrder` submission cutoff
+  (`Orders.MarketOnCloseOrder.SubmissionTimeBuffer`) is 15 minutes 30 seconds before the
+  16:00 ET market close, i.e. orders must be submitted by 15:44:30. The monthly rebalance
+  was scheduled to fire at exactly `TimeRules.At(15, 45)` — 15:45:00 — with essentially no
+  margin before that cutoff. On 2026-09-01, the rebalance logic (absolute-momentum check,
+  relative-momentum ranking across the universe, sentiment-adjusted weight computation, and
+  order construction) took approximately 4 seconds to execute, so `MarketOnCloseOrder()` for
+  the first order wasn't actually called until 15:45:04 — 34 seconds after the 15:44:30
+  cutoff — and LEAN's `PreOrderChecks` rejected it (and, by the same margin, every
+  subsequent order in the same rebalance) before it ever reached the transaction handler.
+- **Alternatives considered and rejected:**
+  1. **Set `Orders.MarketOnCloseOrder.SubmissionTimeBuffer` to a smaller value** — rejected.
+     This narrows the safety margin LEAN itself provides against exchange-imposed MOC
+     submission deadlines; the problem is that the algorithm was already running too close
+     to the existing buffer, not that the buffer itself is wrong.
+  2. **Switch the monthly rebalance path from `MarketOnCloseOrder()` to immediate
+     `MarketOrder()`** — rejected. This would change fill semantics for scheduled monthly
+     rebalances from official-close pricing to whatever intraday price is live at ~15:4x,
+     which is a strategy-level behavior change, not a scheduling fix, and was out of scope
+     for this incident.
+- **Change:** Moved the monthly rebalance `Schedule.On(...)` fire time in
+  `strategies/csharp/DualMomentumV2.cs` from `TimeRules.At(15, 45)` (3:45 PM ET) to
+  `TimeRules.At(15, 40)` (3:40 PM ET), restoring several minutes of margin before the
+  15:44:30 cutoff instead of missing it by seconds. `SubmissionTimeBuffer` was left at its
+  default and the monthly path still uses `MarketOnCloseOrder()`, so official-close fill
+  semantics are unchanged. Four comments elsewhere in the file that referenced the old
+  "3:45 PM" fire time were updated for consistency; no other logic in the file was changed.
+- **Related observability gap (flagged, not fixed in this change):** `OnOrderEvent()`
+  (`strategies/csharp/DualMomentumV2.cs`, ~line 876) already logs `OrderStatus.Invalid` via
+  `Error("[OrderError] ...")` for orders that go through the normal async order lifecycle.
+  However, `MarketOnCloseOrder()`/`MarketOrder()` return values (`OrderTicket`s) are
+  discarded at both call sites in `Rebalance()` (the defensive-branch order and the top-N
+  allocation loop), and a submission-time rejection like the MOC-cutoff case above is
+  rejected synchronously in LEAN's `PreOrderChecks` before an order ever enters the async
+  lifecycle that produces an `OrderEvent` — so `OnOrderEvent`'s existing `Invalid` handler
+  does not necessarily catch this class of rejection, and `Rebalance()` has no way of
+  knowing an order it just submitted was rejected. This is why `[Rebalance] Complete` logged
+  unconditionally on 2026-09-01 despite zero accepted orders. Fixing this properly means
+  capturing the `OrderTicket` from each `MarketOnCloseOrder()`/`MarketOrder()` call and
+  checking `.Status`/`.SubmitRequest.Response` after submission, then logging actual
+  acceptance/rejection per order instead of assuming success. This is deliberately being
+  filed as a follow-up rather than fixed in the same change as the schedule-time move above,
+  per the reasoning in the corresponding PR description — it is a separate behavioral change
+  touching multiple call sites, and this session could not build or test it against the real
+  LEAN engine on the Pi (see "No SSH/network access" note below).
+- **No SSH/network access from this session:** This session (running in an isolated cloud
+  container) has no SSH access to the Pi (`tradingpi`, 192.168.1.231) and no network route to
+  it at all (direct TCP connection attempt to port 22 timed out). It also has no local
+  `dotnet` SDK and no local LEAN engine build output, so `strategies/csharp/DualMomentumV2.csproj`
+  cannot even be compiled from this session (its `HintPath` references resolve to
+  `/opt/lean-engine/Launcher/bin/Release/`, which does not exist here). Consequently `make
+  build`, `make deploy`, `make verify`, and `make force-rebalance` were **not** run from this
+  session — the same limitation already noted in the "Monthly rebalance silently failing"
+  entry above ("this session has no SSH access to the Pi and cannot run this"). Lord Sal (or
+  a session with real Pi access) needs to run `make build && make deploy && make verify` on
+  the Pi to actually build, deploy, and confirm this fix.
+- **Verification:** Pending. The next real exercise of this fix is the October 1, 2026
+  monthly rebalance. A `/tmp/force_rebalance` manual trigger (`make force-rebalance`) does
+  **not** validate this fix: `force-rebalance` calls `Rebalance(useMarketOrders: true)`,
+  which submits immediate `MarketOrder()`s, not `MarketOnCloseOrder()`s — it never exercises
+  the MOC submission-timing path at all. A true test requires either waiting for the next
+  scheduled monthly run or temporarily invoking the `MarketOnCloseOrder()` path directly
+  close to the 15:44:30 cutoff.
+
+*Last updated: 2026-09-02*

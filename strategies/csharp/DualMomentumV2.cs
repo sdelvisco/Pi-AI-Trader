@@ -15,9 +15,11 @@
 // Deployment notes:
 //   - SetStartDate / SetEndDate are intentionally omitted (paper trading).
 //   - SetCash(1000) is used only as an initial paper-trading seed.
-//   - Monthly rebalance orders use MarketOnCloseOrder() (submitted at 3:45 PM ET,
+//   - Monthly rebalance orders use MarketOnCloseOrder() (submitted at 3:40 PM ET,
 //     filled at that day's close); stop-loss, drawdown-halt, and force-rebalance
-//     test orders remain immediate MarketOrder()s.
+//     test orders remain immediate MarketOrder()s. Submission time was moved from
+//     3:45 PM to 3:40 PM on 2026-09-02 to restore margin before LEAN's default
+//     15:44:30 MarketOnCloseOrder submission cutoff -- see DEVIATIONS.md.
 //
 // To compile:
 //   dotnet build strategies/csharp/DualMomentumV2.csproj -c Release
@@ -325,11 +327,16 @@ namespace PiAiTrader.Strategies
             Log($"Stop-loss         : {StopLossThreshold:P0} per position");
             Log($"Defensive asset   : {DefensiveTicker}");
 
-            // Schedule monthly rebalancing at 3:45 PM ET on the first trading day of each month.
+            // Schedule monthly rebalancing at 3:40 PM ET on the first trading day of each month.
             // Orders are submitted via MarketOnCloseOrder() so they fill at that day's close.
+            // Moved from 3:45 PM to 3:40 PM on 2026-09-02: LEAN's default MarketOnCloseOrder
+            // submission cutoff is 00:15:30 before the 16:00 ET close (i.e. 15:44:30), and on
+            // 2026-09-01 rebalance computation took long enough that the 3:45 PM fire time
+            // submitted orders at 15:45:04 -- after the cutoff -- so every order was rejected.
+            // Firing 5 minutes earlier restores several minutes of margin. See DEVIATIONS.md.
             Schedule.On(
                 DateRules.MonthStart(Securities.Keys.First()),
-                TimeRules.At(15, 45),
+                TimeRules.At(15, 40),
                 () => {
                     // Safety guard against duplicate execution.
                     if (Time.Month != _lastRebalanceMonth)
@@ -373,7 +380,7 @@ namespace PiAiTrader.Strategies
         ///   1. Updating the peak portfolio value tracker.
         ///   2. Checking per-position stop-losses.
         ///   3. Evaluating max-drawdown halt condition.
-        /// Note: Monthly rebalancing is now handled via Schedule.On() at 3:45 PM, not in OnData().
+        /// Note: Monthly rebalancing is now handled via Schedule.On() at 3:40 PM, not in OnData().
         /// </summary>
         public override void OnData(Slice data)
         {
@@ -460,7 +467,7 @@ namespace PiAiTrader.Strategies
                 // SetHoldings() so that the Day TimeInForce on
                 // DefaultOrderProperties is respected and the order is not
                 // downgraded to a MarketOnOpen by the Alpaca brokerage model.
-                // The scheduled monthly rebalance fires at 3:45 PM and submits
+                // The scheduled monthly rebalance fires at 3:40 PM and submits
                 // MarketOnCloseOrder() so the fill happens at that day's close;
                 // the force-rebalance test trigger uses an immediate MarketOrder().
                 var defSym   = _symbols[DefensiveTicker];
