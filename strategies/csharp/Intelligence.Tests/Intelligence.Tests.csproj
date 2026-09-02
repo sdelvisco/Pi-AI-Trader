@@ -15,10 +15,10 @@
   directly.
 
   Normal run (never touches the network):
-    dotnet test strategies/csharp/Intelligence.Tests/Intelligence.Tests.csproj filter: Category!=LiveSmoke
+    dotnet test strategies/csharp/Intelligence.Tests/Intelligence.Tests.csproj (filter: Category!=LiveSmoke)
 
   Deliberate, manual, real-network run of the one live smoke test:
-    dotnet test strategies/csharp/Intelligence.Tests/Intelligence.Tests.csproj --filter Category=LiveSmoke
+    dotnet test strategies/csharp/Intelligence.Tests/Intelligence.Tests.csproj (filter: Category=LiveSmoke)
 -->
 <Project Sdk="Microsoft.NET.Sdk">
 
@@ -55,6 +55,22 @@
 
   <ItemGroup>
     <ProjectReference Include="../Intelligence/Intelligence.csproj" />
+  </ItemGroup>
+
+  <!-- ======================================================================
+       Direct QuantConnect.Logging reference, copied to output (Private=true)
+       unlike Intelligence.csproj's reference to the same DLL. That project
+       runs inside the LEAN engine process, where QuantConnect.Logging.dll
+       is already present alongside the running executable. This test
+       project runs standalone via `dotnet test` with no LEAN process
+       nearby, so the assembly must actually be copied into this project's
+       own output folder for the test host to resolve it at runtime.
+       ====================================================================== -->
+  <ItemGroup>
+    <Reference Include="QuantConnect.Logging">
+      <HintPath>/opt/lean-engine/Launcher/bin/Release/QuantConnect.Logging.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
   </ItemGroup>
 
 </Project>
