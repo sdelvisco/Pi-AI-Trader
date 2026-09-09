@@ -26,12 +26,13 @@ namespace PiAiTrader.HeadlineNewsPipeline
     /// </summary>
     public class PollCycleRunner
     {
-        /// <summary>How often the service runs a full poll cycle, per this
-        /// session's spec ("matching this project's documented
-        /// headline-scoring cadence"). Named rather than left as a magic
-        /// number so Program.cs's poll loop and this class's own
-        /// first-run-seeding lookback window can both reference it.</summary>
-        public static readonly TimeSpan PollInterval = TimeSpan.FromMinutes(15);
+        /// <summary>How often the service runs a full poll cycle. Named
+        /// rather than left as a magic number so Program.cs's poll loop and
+        /// this class's own first-run-seeding lookback window can both
+        /// reference it. Changed from 15 minutes to 4 hours per Azure Cost
+        /// Analysis findings — see DEVIATIONS.md for the cost-reduction
+        /// rationale.</summary>
+        public static readonly TimeSpan PollInterval = TimeSpan.FromHours(4);
 
         /// <summary>On the very first run (no state file yet), how far back
         /// to look for headlines instead of attempting to process Alpaca's

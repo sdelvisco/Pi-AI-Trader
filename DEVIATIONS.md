@@ -1350,4 +1350,42 @@ The following cosmetic issues were resolved by updates to `web/templates/dashboa
   scheduled monthly run or temporarily invoking the `MarketOnCloseOrder()` path directly
   close to the 15:44:30 cutoff.
 
-*Last updated: 2026-09-02*
+---
+
+## Headline News Pipeline poll interval: 15 minutes → 4 hours
+
+### `PollCycleRunner.PollInterval` changed from `TimeSpan.FromMinutes(15)` to `TimeSpan.FromHours(4)`
+- **Date discovered:** 2026-09-09
+- **Reason:** Azure Cost Analysis showed daily cost accumulation from LLM sentiment scoring
+  running on a 15-minute poll cadence with no relation to the strategy's actual consumption
+  cadence — `DualMomentumV2`'s monthly rebalance only reads the latest available signal once
+  a month (per `strategies/csharp/DualMomentumV2.cs`'s `Schedule.On(DateRules.MonthStart(...))`
+  rebalance trigger), so scoring headlines every 15 minutes bought no additional decision
+  quality, only additional Azure AI Foundry API cost. A 4-hour cadence still comfortably
+  covers same-day news before the next rebalance while cutting the poll (and therefore Azure
+  LLM call) volume by roughly 16x.
+- **Change:** `services/HeadlineNewsPipeline/PollCycleRunner.cs` line 34:
+  `PollInterval` changed from `TimeSpan.FromMinutes(15)` to `TimeSpan.FromHours(4)`.
+  `InitialLookbackWindow` (line 40) was deliberately left as `= PollInterval` — this is an
+  intentional decision, not an oversight: on a first run (no state file yet, e.g. after a
+  fresh deploy or a deleted state directory), the lookback window scales to 4 hours along
+  with the new cadence, so the first poll cycle looks back exactly one cadence-interval's
+  worth of headlines rather than a now-stale 15-minute window that would miss up to ~3h45m
+  of headlines between deploy and the first successful poll.
+- **Also updated:** `services/headline-news-pipeline.service`'s header comment (documentation
+  only — "Polls Alpaca's News API every 15 minutes" → "every 4 hours"). Confirmed there is no
+  `.timer` unit or `OnCalendar=` directive anywhere in this repo for this service — it's a
+  plain `Type=simple` long-running process (see the "Headline News Pipeline (Phase 2 AI
+  Layer, Step 2)" section above), and the poll cadence is entirely internal to
+  `Program.cs`'s `Task.Delay(PollCycleRunner.PollInterval, ...)` loop, not systemd-driven. So
+  this is a code-level change requiring a rebuild, not a systemd/config-only change.
+- **Impact:** Slower headline-to-signal latency (up to ~4 hours instead of ~15 minutes) in
+  exchange for the cost reduction described above. Since the only current consumer
+  (`DualMomentumV2`'s monthly rebalance, via the not-yet-built Signal Aggregator read path)
+  operates on a monthly cadence, this latency change has no expected effect on strategy
+  behavior.
+- **Deployment:** Not deployed as part of this change — per this session's instructions,
+  deployment (rebuild + copy to the Pi + `systemctl restart headline-news-pipeline`) is
+  being handled manually by Lord Sal, not from this session.
+
+*Last updated: 2026-09-09*
