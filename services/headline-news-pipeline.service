@@ -1,7 +1,7 @@
 # =============================================================================
 # headline-news-pipeline.service — Headline News Pipeline (Phase 2 AI Layer)
 # =============================================================================
-# Polls Alpaca's News API every 15 minutes for headlines tagged against
+# Polls Alpaca's News API every 4 hours for headlines tagged against
 # DualMomentumV2's trading universe, scores each relevant headline/ticker
 # pair via PiAiTrader.Intelligence.LlmSentimentModule (Azure AI Foundry),
 # and appends the resulting Signal objects to a local JSON-lines file for a
