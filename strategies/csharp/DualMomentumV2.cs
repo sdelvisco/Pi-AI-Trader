@@ -15,11 +15,17 @@
 // Deployment notes:
 //   - SetStartDate / SetEndDate are intentionally omitted (paper trading).
 //   - SetCash(1000) is used only as an initial paper-trading seed.
-//   - Monthly rebalance orders use MarketOnCloseOrder() (submitted at 3:40 PM ET,
-//     filled at that day's close); stop-loss, drawdown-halt, and force-rebalance
-//     test orders remain immediate MarketOrder()s. Submission time was moved from
-//     3:45 PM to 3:40 PM on 2026-09-02 to restore margin before LEAN's default
-//     15:44:30 MarketOnCloseOrder submission cutoff -- see DEVIATIONS.md.
+//   - ALL orders (rebalance, stop-loss, drawdown-halt, force-rebalance) are
+//     immediate MarketOrder()s with Day time-in-force (Alpaca time_in_force=day).
+//     Rebalance orders previously used MarketOnCloseOrder() (Alpaca cls), but on
+//     2026-10-01 Alpaca paper accepted every cls order and then expired all of
+//     them unfilled at ~16:01 ET -- see DEVIATIONS.md (2026-10-01 incident).
+//   - Rebalance schedule is selected by the LEAN config parameter
+//     "rebalance-mode" (config.json → "parameters"):
+//       "weekly-test" (default) — every Monday at 10:00 ET (paper fill test)
+//       "monthly"               — first trading day of each month at 3:40 PM ET
+//                                 (the pre-2026-10-01 schedule)
+//     Reverting to monthly is a config change only; no rebuild required.
 //
 // To compile:
 //   dotnet build strategies/csharp/DualMomentumV2.csproj -c Release
@@ -101,6 +107,41 @@ namespace PiAiTrader.Strategies
 
         /// <summary>Paper-trading seed capital (USD). Ignored by live brokerage.</summary>
         private const int SeedCash = 1_000;
+
+        // =====================================================================
+        // ██  REBALANCE SCHEDULE MODE (2026-10-01 paper fill test)  ──────────
+        // The rebalance schedule is chosen at startup from the LEAN config
+        // parameter below, so switching between the temporary weekly test
+        // schedule and the normal monthly schedule is a config.json edit +
+        // lean-trader restart, not a code change + rebuild.
+        // =====================================================================
+
+        /// <summary>
+        /// Name of the LEAN algorithm parameter (config.json → "parameters" →
+        /// "rebalance-mode") that selects the rebalance schedule. Read once in
+        /// Initialize() via GetParameter().
+        /// </summary>
+        private const string RebalanceModeParameter = "rebalance-mode";
+
+        /// <summary>
+        /// Temporary paper-trading test mode: rebalance every Monday at
+        /// 10:00 ET using immediate Day market orders, so we can quickly
+        /// confirm that orders actually fill on Alpaca paper.
+        /// </summary>
+        private const string RebalanceModeWeeklyTest = "weekly-test";
+
+        /// <summary>
+        /// Normal production mode: rebalance on the first trading day of
+        /// each month at 3:40 PM ET (the pre-2026-10-01 schedule).
+        /// </summary>
+        private const string RebalanceModeMonthly = "monthly";
+
+        /// <summary>
+        /// Mode used when the parameter is missing from config.json. Set to
+        /// the weekly test mode for the duration of the paper fill test; flip
+        /// this (or set the config parameter) back to monthly afterward.
+        /// </summary>
+        private const string DefaultRebalanceMode = RebalanceModeWeeklyTest;
 
         // =====================================================================
         // ██  SIGNAL AGGREGATOR (Phase 2, Step 3)  ───────────────────────────
@@ -243,6 +284,19 @@ namespace PiAiTrader.Strategies
         private int _lastRebalanceMonth = -1;
 
         /// <summary>
+        /// Remembers the last calendar date on which the weekly-test rebalance
+        /// ran, so the Monday schedule can never fire Rebalance() twice on the
+        /// same day (mirrors the _lastRebalanceMonth guard used by monthly mode).
+        /// </summary>
+        private DateTime _lastWeeklyRebalanceDate = DateTime.MinValue;
+
+        /// <summary>
+        /// The rebalance schedule mode resolved from config in Initialize()
+        /// (either RebalanceModeWeeklyTest or RebalanceModeMonthly).
+        /// </summary>
+        private string _rebalanceMode = DefaultRebalanceMode;
+
+        /// <summary>
         /// Reads recent HeadlineNewsPipeline signals for a symbol. Stateless
         /// and safe to reuse across rebalances -- each call re-reads the
         /// file fresh (see SignalsFileReader's own class comment on why no
@@ -327,31 +381,96 @@ namespace PiAiTrader.Strategies
             Log($"Stop-loss         : {StopLossThreshold:P0} per position");
             Log($"Defensive asset   : {DefensiveTicker}");
 
-            // Schedule monthly rebalancing at 3:40 PM ET on the first trading day of each month.
-            // Orders are submitted via MarketOnCloseOrder() so they fill at that day's close.
-            // Moved from 3:45 PM to 3:40 PM on 2026-09-02: LEAN's default MarketOnCloseOrder
-            // submission cutoff is 00:15:30 before the 16:00 ET close (i.e. 15:44:30), and on
-            // 2026-09-01 rebalance computation took long enough that the 3:45 PM fire time
-            // submitted orders at 15:45:04 -- after the cutoff -- so every order was rejected.
-            // Firing 5 minutes earlier restores several minutes of margin. See DEVIATIONS.md.
-            Schedule.On(
-                DateRules.MonthStart(Securities.Keys.First()),
-                TimeRules.At(15, 40),
-                () => {
-                    // Safety guard against duplicate execution.
-                    if (Time.Month != _lastRebalanceMonth)
+            // ------------------------------------------------------------------
+            // Resolve the rebalance schedule mode from config.json's
+            // "parameters" object (LEAN's JobQueue copies it into the job
+            // packet; GetParameter() returns the default when it is absent).
+            // Trim + lower-case so " Monthly " etc. still match.
+            // ------------------------------------------------------------------
+            var configuredMode = (GetParameter(RebalanceModeParameter, DefaultRebalanceMode) ?? DefaultRebalanceMode)
+                .Trim()
+                .ToLowerInvariant();
+
+            if (configuredMode == RebalanceModeWeeklyTest || configuredMode == RebalanceModeMonthly)
+            {
+                _rebalanceMode = configuredMode;
+            }
+            else
+            {
+                // Unrecognised value (e.g. a typo): fall back to the default
+                // rather than crash the algorithm, but make it loud in the log
+                // so the misconfiguration is noticed.
+                Error($"[Config] Unrecognised {RebalanceModeParameter} '{configuredMode}' — " +
+                      $"expected '{RebalanceModeWeeklyTest}' or '{RebalanceModeMonthly}'. " +
+                      $"Falling back to '{DefaultRebalanceMode}'.");
+                _rebalanceMode = DefaultRebalanceMode;
+            }
+
+            // Log the active mode at startup so it is visible in the journal
+            // right next to the "DualMomentumV2 Initialized" line make verify checks.
+            Log($"Rebalance mode    : {_rebalanceMode}" +
+                (_rebalanceMode == RebalanceModeWeeklyTest
+                    ? " (TEST: every Monday 10:00 ET, Day market orders)"
+                    : " (first trading day of month 15:40 ET, Day market orders)"));
+
+            if (_rebalanceMode == RebalanceModeWeeklyTest)
+            {
+                // ── weekly-test: every Monday at 10:00 ET ──────────────────────
+                // DateRules.Every(DayOfWeek.Monday) is NOT exchange-calendar
+                // aware (upstream LEAN implements it as a plain day-of-week
+                // filter over calendar days), so it also fires on Monday market
+                // holidays. The IsMarketOpen() guard below skips those days
+                // instead of submitting orders into a closed market.
+                // 10:00 ET (30 min after the open) avoids the opening auction.
+                Schedule.On(
+                    DateRules.Every(DayOfWeek.Monday),
+                    TimeRules.At(10, 0),
+                    () =>
                     {
-                        _lastRebalanceMonth = Time.Month;
-                        Log($"[Rebalance] Triggered on {Time:yyyy-MM-dd} (first trading day of {Time:MMMM yyyy})");
+                        // Skip Monday market holidays (exchange closed).
+                        if (!IsMarketOpen(AbsMomReferenceTicker))
+                        {
+                            Log($"[Rebalance] Weekly-test trigger skipped on {Time:yyyy-MM-dd}: market closed.");
+                            return;
+                        }
+
+                        // Safety guard against duplicate execution on the same day.
+                        if (Time.Date == _lastWeeklyRebalanceDate) return;
+                        _lastWeeklyRebalanceDate = Time.Date;
+
+                        Log($"[Rebalance] Triggered on {Time:yyyy-MM-dd HH:mm} (weekly-test mode, Monday 10:00 ET)");
                         Rebalance();
                     }
-                }
-            );
+                );
+            }
+            else
+            {
+                // ── monthly: first trading day of each month at 3:40 PM ET ────
+                // This is the pre-2026-10-01 schedule, unchanged. The 3:40 PM
+                // time was originally chosen (2026-09-02) to beat LEAN's
+                // 15:44:30 MarketOnCloseOrder submission cutoff. Rebalance now
+                // uses Day MarketOrder()s, so that cutoff no longer applies; the
+                // time is kept as-is so "monthly" means exactly the previous
+                // schedule. See DEVIATIONS.md.
+                Schedule.On(
+                    DateRules.MonthStart(Securities.Keys.First()),
+                    TimeRules.At(15, 40),
+                    () => {
+                        // Safety guard against duplicate execution.
+                        if (Time.Month != _lastRebalanceMonth)
+                        {
+                            _lastRebalanceMonth = Time.Month;
+                            Log($"[Rebalance] Triggered on {Time:yyyy-MM-dd} (first trading day of {Time:MMMM yyyy})");
+                            Rebalance();
+                        }
+                    }
+                );
+            }
 
             // Poll every minute during market hours for a manual rebalance trigger file.
             // To trigger: touch /tmp/force_rebalance on the Pi.
-            // Uses useMarketOrders: true so testing fires immediate fills instead of
-            // waiting for the MarketOnCloseOrder() used by the scheduled monthly rebalance.
+            // Rebalance() always uses immediate Day MarketOrder()s now, so this
+            // behaves identically to a scheduled rebalance in either mode.
             Schedule.On(
                 DateRules.EveryDay(),
                 TimeRules.Every(TimeSpan.FromMinutes(1)),
@@ -364,7 +483,7 @@ namespace PiAiTrader.Strategies
                         Log("[Rebalance] Manual trigger detected via /tmp/force_rebalance");
                         File.Delete("/tmp/force_rebalance");
                         _lastRebalanceMonth = -1;
-                        Rebalance(useMarketOrders: true);
+                        Rebalance();
                     }
                 }
             );
@@ -380,7 +499,8 @@ namespace PiAiTrader.Strategies
         ///   1. Updating the peak portfolio value tracker.
         ///   2. Checking per-position stop-losses.
         ///   3. Evaluating max-drawdown halt condition.
-        /// Note: Monthly rebalancing is now handled via Schedule.On() at 3:40 PM, not in OnData().
+        /// Note: Rebalancing is handled via Schedule.On() (weekly-test or monthly mode,
+        /// see Initialize()), not in OnData().
         /// </summary>
         public override void OnData(Slice data)
         {
@@ -421,22 +541,26 @@ namespace PiAiTrader.Strategies
         // =====================================================================
 
         /// <summary>
-        /// Core monthly rebalance logic.
+        /// Core rebalance logic (run on the weekly-test or monthly schedule).
         /// Steps:
         ///   A. Run the absolute momentum filter (SPY vs AGG over 12 months).
         ///      → If risk-off: move 100% to AGG.
         ///   B. If risk-on: rank universe by 6-month return, pick top-N symbols.
         ///   C. Liquidate positions not in the new top-N.
         ///   D. Allocate PositionWeight to each of the top-N symbols.
+        /// All orders are immediate MarketOrder()s with Day time-in-force
+        /// (Alpaca time_in_force=day). MarketOnCloseOrder() (Alpaca cls) was
+        /// removed after the 2026-10-01 incident in which Alpaca paper expired
+        /// every cls order unfilled -- see DEVIATIONS.md.
         /// </summary>
-        /// <param name="useMarketOrders">
-        /// When true, submit immediate MarketOrder()s instead of MarketOnCloseOrder()s.
-        /// Used by the manual force-rebalance trigger so testing doesn't have to wait
-        /// for the closing auction. The scheduled monthly rebalance leaves this false
-        /// so orders fill at the close via MarketOnCloseOrder().
-        /// </param>
-        private void Rebalance(bool useMarketOrders = false)
+        private void Rebalance()
         {
+            // Every OrderTicket this rebalance creates (liquidations + buys/
+            // adjustments) is collected here so LogRebalanceOutcome() can
+            // report honestly whether the broker accepted them, instead of
+            // unconditionally printing "[Rebalance] Complete".
+            var tickets = new List<OrderTicket>();
+
             // ------------------------------------------------------------------
             // A. ABSOLUTE MOMENTUM FILTER
             //    Compare SPY 12-month return vs AGG 12-month return.
@@ -462,27 +586,23 @@ namespace PiAiTrader.Strategies
             {
                 // ── Risk-off: go fully defensive ────────────────────────────────
                 Log("[Defensive] Moving 100% to AGG (absolute momentum filter: RISK-OFF).");
-                LiquidateAllExcept(DefensiveTicker);
-                // Use an explicit MarketOrder/MarketOnCloseOrder instead of
-                // SetHoldings() so that the Day TimeInForce on
-                // DefaultOrderProperties is respected and the order is not
-                // downgraded to a MarketOnOpen by the Alpaca brokerage model.
-                // The scheduled monthly rebalance fires at 3:40 PM and submits
-                // MarketOnCloseOrder() so the fill happens at that day's close;
-                // the force-rebalance test trigger uses an immediate MarketOrder().
+                tickets.AddRange(LiquidateAllExcept(DefensiveTicker));
+                // Use an explicit MarketOrder instead of SetHoldings() so that
+                // the Day TimeInForce on DefaultOrderProperties is respected
+                // and the order is not downgraded to a MarketOnOpen by the
+                // Alpaca brokerage model.
                 var defSym   = _symbols[DefensiveTicker];
                 var defPrice = Securities[defSym].Price;
                 if (defPrice > 0)
                 {
                     var targetQty = (long)(1.0m * Portfolio.TotalPortfolioValue / defPrice);
                     var delta     = targetQty - (long)Portfolio[defSym].Quantity;
-                    if (delta != 0)
-                    {
-                        if (useMarketOrders) MarketOrder(defSym, (decimal)delta);
-                        else MarketOnCloseOrder(defSym, (decimal)delta);
-                    }
+                    // Immediate Day market order (Alpaca time_in_force=day).
+                    if (delta != 0) tickets.Add(MarketOrder(defSym, (decimal)delta));
                 }
                 Log($"[Defensive] Target: 100% {DefensiveTicker}");
+                // Report whether the broker actually accepted the orders.
+                LogRebalanceOutcome(tickets, $"100% {DefensiveTicker}");
                 return;
             }
 
@@ -521,7 +641,7 @@ namespace PiAiTrader.Strategies
             // ------------------------------------------------------------------
             // C. LIQUIDATE positions not in the new target set
             // ------------------------------------------------------------------
-            LiquidateAllExcept(topTickers);
+            tickets.AddRange(LiquidateAllExcept(topTickers));
 
             // ------------------------------------------------------------------
             // D. ALLOCATE to each top-N symbol, using sentiment-adjusted
@@ -536,24 +656,17 @@ namespace PiAiTrader.Strategies
             {
                 var sym = _symbols[ticker];
                 var weight = tickerWeights.GetValueOrDefault(ticker, PositionWeight);
-                // Use an explicit MarketOrder/MarketOnCloseOrder instead of
-                // SetHoldings() so that the Day TimeInForce on
-                // DefaultOrderProperties is respected.
+                // Use an explicit MarketOrder instead of SetHoldings() so that
+                // the Day TimeInForce on DefaultOrderProperties is respected.
                 // Target quantity = weight × TotalPortfolioValue / Price.
                 // Subtract the current held quantity to get only the incremental
                 // order needed (mirrors what SetHoldings() does internally).
-                // The scheduled monthly rebalance submits MarketOnCloseOrder()
-                // (fills at the close); the force-rebalance test trigger uses
-                // an immediate MarketOrder() instead.
                 if (Securities.ContainsKey(sym) && Securities[sym].Price > 0)
                 {
                     var targetQty = (long)(weight * Portfolio.TotalPortfolioValue / Securities[sym].Price);
                     var delta     = targetQty - (long)Portfolio[sym].Quantity;
-                    if (delta != 0)
-                    {
-                        if (useMarketOrders) MarketOrder(sym, (decimal)delta);
-                        else MarketOnCloseOrder(sym, (decimal)delta);
-                    }
+                    // Immediate Day market order (Alpaca time_in_force=day).
+                    if (delta != 0) tickets.Add(MarketOrder(sym, (decimal)delta));
                     // Record the current price as the "entry price" for stop-loss tracking.
                     // (Will be refined by OnOrderEvent fill price — this is a best-effort
                     //  initialisation in case OnOrderEvent is delayed.)
@@ -562,7 +675,70 @@ namespace PiAiTrader.Strategies
                 Log($"[Allocate] {ticker} → {weight:P1} (base {PositionWeight:P0}, entry ~${_entryPrices.GetValueOrDefault(sym, 0):F2})");
             }
 
-            Log($"[Rebalance] Complete. Portfolio target: {string.Join(", ", topTickers.Select(t => $"{t}@{tickerWeights.GetValueOrDefault(t, PositionWeight):P1}"))}");
+            // Only claims "Complete" if every order was accepted by the broker.
+            LogRebalanceOutcome(tickets,
+                string.Join(", ", topTickers.Select(t => $"{t}@{tickerWeights.GetValueOrDefault(t, PositionWeight):P1}")));
+        }
+
+        /// <summary>
+        /// Logs the outcome of a rebalance based on the actual state of the
+        /// OrderTickets it produced, rather than unconditionally claiming
+        /// success.
+        ///
+        /// In live mode LEAN's synchronous MarketOrder() blocks for up to
+        /// Transactions.MarketOrderFillTimeout (5 s by default in upstream
+        /// LEAN) waiting for the order to close, so by the time this runs each
+        /// ticket's Status reflects the broker's response so far:
+        ///   Submitted / PartiallyFilled / Filled → broker accepted the order
+        ///   Invalid / Canceled                   → rejected or canceled
+        ///   anything else (e.g. New)             → no broker acknowledgement yet
+        ///
+        /// "Accepted" is NOT the same as "filled": a Submitted Day market order
+        /// can still go unfilled. Actual fills are logged per order by
+        /// OnOrderEvent() as "[OrderEvent] ... Status: Filled".
+        /// </summary>
+        /// <param name="tickets">Every OrderTicket created by this rebalance.</param>
+        /// <param name="targetDescription">Human-readable target portfolio for the log line.</param>
+        private void LogRebalanceOutcome(List<OrderTicket> tickets, string targetDescription)
+        {
+            // No orders at all: holdings were already at target (or every
+            // price was 0 so nothing could be sized). Nothing to accept.
+            if (tickets.Count == 0)
+            {
+                Log($"[Rebalance] Complete — no orders needed. Portfolio target: {targetDescription}");
+                return;
+            }
+
+            // Bucket tickets by what the broker has told us so far.
+            var accepted = tickets.Where(t =>
+                t.Status == OrderStatus.Submitted ||
+                t.Status == OrderStatus.PartiallyFilled ||
+                t.Status == OrderStatus.Filled).ToList();
+            var rejected = tickets.Where(t =>
+                t.Status == OrderStatus.Invalid ||
+                t.Status == OrderStatus.Canceled).ToList();
+            var unconfirmed = tickets.Except(accepted).Except(rejected).ToList();
+            var filled = accepted.Count(t => t.Status == OrderStatus.Filled);
+
+            if (rejected.Count == 0 && unconfirmed.Count == 0)
+            {
+                // Every order was acknowledged by the broker. Still be explicit
+                // that acceptance != fill.
+                Log($"[Rebalance] Complete — {accepted.Count}/{tickets.Count} orders accepted by broker " +
+                    $"({filled} filled so far; watch [OrderEvent] lines for remaining fills). " +
+                    $"Portfolio target: {targetDescription}");
+                return;
+            }
+
+            // At least one order was rejected or never acknowledged: do NOT
+            // claim success. Name each problem order so it can be matched to
+            // its [OrderEvent] line.
+            Error($"[Rebalance] NOT COMPLETE — accepted={accepted.Count}, rejected/canceled={rejected.Count}, " +
+                  $"unconfirmed={unconfirmed.Count} of {tickets.Count} orders. Intended target: {targetDescription}");
+            foreach (var t in rejected.Concat(unconfirmed))
+            {
+                Error($"[Rebalance]   Order {t.OrderId} {t.Symbol.Value} qty={t.Quantity} status={t.Status}");
+            }
         }
 
         // =====================================================================
@@ -841,11 +1017,18 @@ namespace PiAiTrader.Strategies
         /// Liquidates all currently-held positions EXCEPT those whose ticker
         /// is included in <paramref name="keepTickers"/>.
         /// Clears the corresponding entry-price records.
+        /// Returns the OrderTickets for the sell orders it submitted so that
+        /// Rebalance() can include them in its accepted/rejected summary
+        /// (callers that don't need them, e.g. CheckDrawdownHalt(), simply
+        /// ignore the return value).
         /// </summary>
         /// <param name="keepTickers">Tickers to retain. Pass empty to liquidate everything.</param>
-        private void LiquidateAllExcept(IEnumerable<string> keepTickers)
+        /// <returns>One OrderTicket per liquidation order submitted.</returns>
+        private List<OrderTicket> LiquidateAllExcept(IEnumerable<string> keepTickers)
         {
             var keepSet = new HashSet<string>(keepTickers, StringComparer.OrdinalIgnoreCase);
+            // Collects the ticket for every liquidation order submitted below.
+            var tickets = new List<OrderTicket>();
 
             foreach (var holding in Portfolio.Values)
             {
@@ -858,17 +1041,19 @@ namespace PiAiTrader.Strategies
                     // Use MarketOrder instead of Liquidate() for consistent Day
                     // TimeInForce behaviour under AlpacaBrokerageModel.
                     var holdQty = Portfolio[holding.Symbol].Quantity;
-                    if (holdQty != 0) MarketOrder(holding.Symbol, -holdQty);
+                    if (holdQty != 0) tickets.Add(MarketOrder(holding.Symbol, -holdQty));
                     _entryPrices.Remove(holding.Symbol);
                 }
             }
+
+            return tickets;
         }
 
         /// <summary>
         /// Overload that accepts a single ticker string (convenience wrapper for
         /// the defensive-mode path where we only want to keep one asset).
         /// </summary>
-        private void LiquidateAllExcept(string keepTicker)
+        private List<OrderTicket> LiquidateAllExcept(string keepTicker)
             => LiquidateAllExcept(new[] { keepTicker });
 
         // =====================================================================
@@ -877,11 +1062,28 @@ namespace PiAiTrader.Strategies
 
         /// <summary>
         /// Called by LEAN whenever an order status changes.
+        /// Always: logs one "[OrderEvent]" line for EVERY event (Submitted,
+        ///         Filled, PartiallyFilled, Canceled, Invalid, and any other
+        ///         status) with symbol, quantities, fill price and the
+        ///         brokerage message -- added after the 2026-10-01 incident,
+        ///         where orders expired at Alpaca with nothing in our log.
         /// On fill: records the actual fill price as the entry price for
         ///          stop-loss tracking (more accurate than the pre-order estimate).
         /// </summary>
         public override void OnOrderEvent(OrderEvent orderEvent)
         {
+            // ── Universal order-event log line ─────────────────────────────────
+            // OrderQty  = the order's total requested quantity (signed).
+            // FillQty   = quantity filled by THIS event (0 for non-fill events).
+            // FillPrice = price of THIS event's fill (0 for non-fill events).
+            // Message   = brokerage/LEAN message (rejection reason etc.);
+            //             shown as "(none)" when empty so the field is never blank.
+            var brokerMessage = string.IsNullOrWhiteSpace(orderEvent.Message) ? "(none)" : orderEvent.Message;
+            Log($"[OrderEvent] {orderEvent.Symbol.Value} | Id: {orderEvent.OrderId} | " +
+                $"Status: {orderEvent.Status} | Dir: {orderEvent.Direction} | " +
+                $"OrderQty: {orderEvent.Quantity} | FillQty: {orderEvent.FillQuantity} | " +
+                $"FillPrice: ${orderEvent.FillPrice:F2} | Message: {brokerMessage}");
+
             if (orderEvent.Status == OrderStatus.Filled ||
                 orderEvent.Status == OrderStatus.PartiallyFilled)
             {
