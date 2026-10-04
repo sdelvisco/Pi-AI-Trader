@@ -1389,3 +1389,76 @@ The following cosmetic issues were resolved by updates to `web/templates/dashboa
   being handled manually by Lord Sal, not from this session.
 
 *Last updated: 2026-09-09*
+
+---
+
+## 2026-10-01 incident: MarketOnClose rebalance orders expired unfilled on Alpaca paper
+
+### Rebalance orders switched from `MarketOnCloseOrder()` to Day `MarketOrder()`; temporary weekly-test schedule added
+- **Date of incident:** 2026-10-01 (first trading day of October; scheduled monthly rebalance).
+  **Date documented / changed:** 2026-10-04.
+- **What happened (from the LEAN log and the Alpaca API, as reported by Lord Sal):**
+  `DualMomentumV2` submitted its rebalance orders via `MarketOnCloseOrder()` at 15:40 ET.
+  Alpaca accepted them as `type=market`, `time_in_force=cls`, then set every one of them to
+  status `expired` at ~16:01 ET with `filled_qty=0`. No fills. LEAN logged
+  `[Rebalance] Complete` regardless, because that line was printed unconditionally after
+  the orders were submitted and never looked at their status.
+- **Root cause:** **Not confirmed.** The leading hypothesis is that Alpaca *paper* does not
+  reliably simulate `cls` (market-on-close) orders. That is based on Alpaca community forum
+  reports, not official Alpaca documentation. Other causes have not been ruled out.
+- **Change (test-only, intended to be reverted to monthly once fills are confirmed):**
+  1. `Rebalance()` now submits immediate `MarketOrder()`s for all rebalance orders (both the
+     risk-on top-N path and the risk-off 100% AGG path). `MarketOnCloseOrder()` is no longer
+     used anywhere in `DualMomentumV2.cs`. The `useMarketOrders` parameter (previously used
+     only by the `/tmp/force_rebalance` trigger) was removed since both paths are now
+     identical.
+     - **Time-in-force sent to Alpaca:** `DefaultOrderProperties` is
+       `AlpacaOrderProperties { TimeInForce = TimeInForce.Day }` (unchanged). Per upstream
+       `QuantConnect/Lean.Brokerages.Alpaca` source
+       (`AlpacaBrokerageExtensions.ConvertLeanTimeInForceToBrokerage`), LEAN maps
+       `OrderType.MarketOnClose` → `cls` and `OrderType.MarketOnOpen` → `opg` regardless of
+       TIF; every other order type maps `DayTimeInForce` → `day`. So a `MarketOrder()` is sent
+       as `type=market`, `time_in_force=day`. This was read from the upstream repo's current
+       default branch, not from the LEAN/Alpaca build installed on the Pi.
+  2. The rebalance schedule is now selected by a LEAN algorithm parameter,
+     `rebalance-mode`, in `config/lean_config.template.json` → `"parameters"` (rendered into
+     `config.json` by `make deploy`, read via `GetParameter()`):
+     - `"weekly-test"` (**default**): every Monday at 10:00 ET. Uses
+       `DateRules.Every(DayOfWeek.Monday)`, which upstream LEAN implements as a plain
+       day-of-week filter (not exchange-calendar aware), so an `IsMarketOpen("SPY")` guard
+       skips Monday market holidays.
+     - `"monthly"`: first trading day of the month at 15:40 ET — the previous schedule,
+       unchanged (the 15:40 time was chosen for the old MOC cutoff and is now merely
+       retained; orders are Day market orders in both modes).
+     - Unrecognised values log an error and fall back to `weekly-test`.
+     - The active mode is logged at startup as `Rebalance mode    : ...`.
+     - **To revert:** set `"rebalance-mode": "monthly"` in the template and `make deploy`.
+       No rebuild needed. Reverting the order type back to MOC (if ever desired) *is* a
+       code change.
+  3. `OnOrderEvent()` now logs one `[OrderEvent]` line for every order event (Submitted,
+     Filled, PartiallyFilled, Canceled, Invalid, and any other status) with symbol, order id,
+     status, direction, order quantity, fill quantity, fill price, and the brokerage message.
+     The existing `[OrderFill]` / `[OrderError]` / `[OrderCancel]` lines and the stop-loss
+     entry-price bookkeeping are unchanged.
+  4. `[Rebalance] Complete` is now only logged when every order the rebalance created
+     (including liquidations) has a ticket status of Submitted / PartiallyFilled / Filled
+     (i.e. acknowledged by the broker), or when no orders were needed. Otherwise an error
+     `[Rebalance] NOT COMPLETE — accepted=…, rejected/canceled=…, unconfirmed=…` is logged
+     with one line per problem order. This relies on LEAN's synchronous `MarketOrder()`
+     blocking for up to `Transactions.MarketOrderFillTimeout` (5 s default in live mode in
+     upstream LEAN) before returning. "Accepted" still does not mean "filled" — fills are
+     only confirmed by `[OrderEvent] ... Status: Filled` lines.
+- **Not changed:** the Signal Aggregator / AI layer (`ComputeSentimentAdjustedWeights` and
+  everything under `strategies/csharp/Intelligence/`), stop-loss and drawdown-halt logic,
+  the universe, and all strategy constants.
+- **Validation status:** **Not built or run.** The session that made this change had no
+  `dotnet` SDK and no `/opt/lean-engine`, so it was not compiled and has not been observed
+  on Alpaca. The member names used (`OrderTicket.Status/OrderId/Symbol/Quantity`,
+  `OrderEvent.Quantity/Message`, `GetParameter`, `DateRules.Every`) were checked against
+  upstream LEAN source only. Must be validated on the Pi with `make build`.
+- **Behavioral side effects to be aware of:** in weekly-test mode the strategy rebalances
+  (and may turn over the whole portfolio) every week — paper money only, strategy behavior
+  is irrelevant for this test. Market orders fill at prevailing prices rather than the
+  closing price, and order sizing still uses the latest daily-bar price (unchanged).
+
+*Last updated: 2026-10-04*
