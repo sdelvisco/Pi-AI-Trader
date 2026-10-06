@@ -1462,3 +1462,63 @@ The following cosmetic issues were resolved by updates to `web/templates/dashboa
   closing price, and order sizing still uses the latest daily-bar price (unchanged).
 
 *Last updated: 2026-10-04*
+
+---
+
+## 2026-10-06: Weekly paper fill test concluded; rebalance reverted to monthly (10:00 ET, Day orders)
+
+### Weekly-test schedule and `rebalance-mode` switch removed; monthly schedule moved to 10:00 ET
+- **Date documented / changed:** 2026-10-06.
+- **Background:** after the 2026-10-01 incident above (every `MarketOnCloseOrder()` /
+  Alpaca `time_in_force=cls` rebalance order submitted at 15:40 ET was accepted and then
+  expired unfilled at ~16:01 ET), PR #51 (merged 2026-10-04) switched all rebalance orders
+  to Day `MarketOrder()`s and added a temporary `rebalance-mode` config parameter whose
+  default, `"weekly-test"`, rebalanced every Monday at 10:00 ET.
+- **Test result:** the Monday 2026-10-05 10:00 ET weekly-test rebalance **filled** on Alpaca
+  paper — CSCO buy 1 @ $112.21 and XLK sell 1 @ $200.34, as shown on the dashboard's Recent
+  Trades panel and reported by Lord Sal. The test goal (confirm Day market orders fill on
+  Alpaca paper) is met. Order IDs were not cross-checked from the authoring session (no Pi
+  access); see the separate dashboard investigation for the two extra `submitted` rows that
+  appeared alongside these fills.
+- **Change:**
+  1. Rebalance schedule is now hard-coded in `DualMomentumV2.Initialize()` as
+     `Schedule.On(DateRules.MonthStart(_symbols["SPY"]), TimeRules.At(10, 0), ...)`
+     (via the `AbsMomReferenceTicker`, `RebalanceHourEt`, `RebalanceMinuteEt` constants):
+     **first trading day of each month at 10:00 ET**.
+     - **Date rule:** unchanged in kind from the pre-PR-#51 schedule (`DateRules.MonthStart`).
+       Read at the LEAN commit pinned in `setup/06_lean_build.sh` (`c88955b9`):
+       `MonthStart(symbol)` uses the symbol's `SecurityExchangeHours`; `GetScheduledDay()`
+       keeps day 1 if `IsDateOpen()` is true, otherwise moves to `GetNextTradingDay()`, so
+       weekends and market-hours-database holidays roll forward.
+     - **Reference symbol changed** from `Securities.Keys.First()` to SPY. The old call took
+       whichever key the `SecurityManager` enumerated first — order not guaranteed by LEAN —
+       and only produced correct dates because every universe symbol is a US equity on the
+       same NYSE calendar. Naming SPY gives identical dates, deterministically.
+     - **Time rule:** 10:00 ET (kept from the weekly test). **Not** the previous 15:40 ET.
+  2. **Order type unchanged:** Day `MarketOrder()`s (Alpaca `time_in_force=day`).
+     `MarketOnCloseOrder()` + 15:40 ET is deliberately **not** restored, because that
+     combination expired unfilled on 2026-10-01 and its root cause is still unconfirmed.
+  3. Removed: the `"weekly-test"` mode (`DateRules.Every(DayOfWeek.Monday)` +
+     `IsMarketOpen` holiday guard), the `rebalance-mode` parameter and its `GetParameter()`
+     read, the `RebalanceMode*` constants, `_rebalanceMode`, `_lastWeeklyRebalanceDate`, and
+     the `"parameters"` object in `config/lean_config.template.json` (its
+     `_comment_parameters` was replaced by `_comment_rebalance_schedule`). Changing the
+     schedule is again a code change + `make build`, not a config edit.
+  4. Startup log line changed from `Rebalance mode    : ...` to
+     `Rebalance schedule: first trading day of month 10:00 ET, Day market orders`.
+     `[Rebalance] Triggered on ...` now includes the time (`yyyy-MM-dd HH:mm`).
+- **Next expected rebalance:** **Monday 2026-11-02, 10:00 ET.** Method: 2026-11-01 is a
+  Sunday (computed with Python's `datetime`); the pinned LEAN `market-hours-database.json`
+  entry `Equity-usa-[*]` lists no holiday on 2026-11-02 (2026 holidays after October:
+  11/26, 12/25; early closes 11/27, 12/24), so `GetNextTradingDay(2026-11-01)` = 2026-11-02.
+  October's scheduled day (2026-10-01) is already past, so a restart after deploying this
+  change does not fire an October rebalance. The following one is Tuesday 2026-12-01.
+- **Not changed:** `Rebalance()` logic, `[OrderEvent]` logging, `LogRebalanceOutcome()`,
+  `/tmp/force_rebalance` trigger, stop-loss / drawdown-halt logic, the Signal Aggregator /
+  `HeadlineNewsPipeline` / Azure configuration.
+- **Validation status:** **Not built or run.** The authoring session had no `dotnet` SDK and
+  no `/opt/lean-engine`. Must be validated on the Pi with
+  `make build && make deploy && make verify`, and the startup journal should show the new
+  `Rebalance schedule:` line.
+
+*Last updated: 2026-10-06*

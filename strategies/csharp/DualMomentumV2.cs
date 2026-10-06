@@ -20,12 +20,14 @@
 //     Rebalance orders previously used MarketOnCloseOrder() (Alpaca cls), but on
 //     2026-10-01 Alpaca paper accepted every cls order and then expired all of
 //     them unfilled at ~16:01 ET -- see DEVIATIONS.md (2026-10-01 incident).
-//   - Rebalance schedule is selected by the LEAN config parameter
-//     "rebalance-mode" (config.json → "parameters"):
-//       "weekly-test" (default) — every Monday at 10:00 ET (paper fill test)
-//       "monthly"               — first trading day of each month at 3:40 PM ET
-//                                 (the pre-2026-10-01 schedule)
-//     Reverting to monthly is a config change only; no rebuild required.
+//   - Rebalance schedule: FIRST TRADING DAY of each month at 10:00 ET
+//     (DateRules.MonthStart on SPY's exchange calendar, so weekends and NYSE
+//     holidays roll forward to the next open day). Hard-coded in Initialize().
+//     History: PR #51 (2026-10-04) temporarily added a "rebalance-mode" config
+//     switch with a weekly Monday 10:00 ET paper fill test; the 2026-10-05 run
+//     filled on Alpaca paper, so the switch and the weekly mode were removed
+//     and the 10:00 ET time was kept for the monthly schedule -- see
+//     DEVIATIONS.md (2026-10-06 entry).
 //
 // To compile:
 //   dotnet build strategies/csharp/DualMomentumV2.csproj -c Release
@@ -109,39 +111,25 @@ namespace PiAiTrader.Strategies
         private const int SeedCash = 1_000;
 
         // =====================================================================
-        // ██  REBALANCE SCHEDULE MODE (2026-10-01 paper fill test)  ──────────
-        // The rebalance schedule is chosen at startup from the LEAN config
-        // parameter below, so switching between the temporary weekly test
-        // schedule and the normal monthly schedule is a config.json edit +
-        // lean-trader restart, not a code change + rebuild.
+        // ██  REBALANCE SCHEDULE  ────────────────────────────────────────────
+        // Monthly: first trading day of each month at 10:00 ET (exchange time).
+        // The date rule lives in Initialize() (DateRules.MonthStart on SPY);
+        // the time-of-day is declared here so it is easy to find and tune.
         // =====================================================================
 
         /// <summary>
-        /// Name of the LEAN algorithm parameter (config.json → "parameters" →
-        /// "rebalance-mode") that selects the rebalance schedule. Read once in
-        /// Initialize() via GetParameter().
+        /// Hour (exchange time, ET, 24-hour clock) at which the monthly
+        /// rebalance fires. 10:00 ET is 30 minutes after the 09:30 open, which
+        /// avoids the opening auction and gives Day market orders the rest of
+        /// the session to fill. Kept from the PR #51 weekly paper fill test,
+        /// whose 2026-10-05 10:00 ET run filled on Alpaca paper; the previous
+        /// 15:40 ET MarketOnClose combination expired unfilled on 2026-10-01
+        /// and must not be restored -- see DEVIATIONS.md.
         /// </summary>
-        private const string RebalanceModeParameter = "rebalance-mode";
+        private const int RebalanceHourEt = 10;
 
-        /// <summary>
-        /// Temporary paper-trading test mode: rebalance every Monday at
-        /// 10:00 ET using immediate Day market orders, so we can quickly
-        /// confirm that orders actually fill on Alpaca paper.
-        /// </summary>
-        private const string RebalanceModeWeeklyTest = "weekly-test";
-
-        /// <summary>
-        /// Normal production mode: rebalance on the first trading day of
-        /// each month at 3:40 PM ET (the pre-2026-10-01 schedule).
-        /// </summary>
-        private const string RebalanceModeMonthly = "monthly";
-
-        /// <summary>
-        /// Mode used when the parameter is missing from config.json. Set to
-        /// the weekly test mode for the duration of the paper fill test; flip
-        /// this (or set the config parameter) back to monthly afterward.
-        /// </summary>
-        private const string DefaultRebalanceMode = RebalanceModeWeeklyTest;
+        /// <summary>Minute past <see cref="RebalanceHourEt"/> at which the monthly rebalance fires.</summary>
+        private const int RebalanceMinuteEt = 0;
 
         // =====================================================================
         // ██  SIGNAL AGGREGATOR (Phase 2, Step 3)  ───────────────────────────
@@ -284,19 +272,6 @@ namespace PiAiTrader.Strategies
         private int _lastRebalanceMonth = -1;
 
         /// <summary>
-        /// Remembers the last calendar date on which the weekly-test rebalance
-        /// ran, so the Monday schedule can never fire Rebalance() twice on the
-        /// same day (mirrors the _lastRebalanceMonth guard used by monthly mode).
-        /// </summary>
-        private DateTime _lastWeeklyRebalanceDate = DateTime.MinValue;
-
-        /// <summary>
-        /// The rebalance schedule mode resolved from config in Initialize()
-        /// (either RebalanceModeWeeklyTest or RebalanceModeMonthly).
-        /// </summary>
-        private string _rebalanceMode = DefaultRebalanceMode;
-
-        /// <summary>
         /// Reads recent HeadlineNewsPipeline signals for a symbol. Stateless
         /// and safe to reuse across rebalances -- each call re-reads the
         /// file fresh (see SignalsFileReader's own class comment on why no
@@ -381,96 +356,64 @@ namespace PiAiTrader.Strategies
             Log($"Stop-loss         : {StopLossThreshold:P0} per position");
             Log($"Defensive asset   : {DefensiveTicker}");
 
-            // ------------------------------------------------------------------
-            // Resolve the rebalance schedule mode from config.json's
-            // "parameters" object (LEAN's JobQueue copies it into the job
-            // packet; GetParameter() returns the default when it is absent).
-            // Trim + lower-case so " Monthly " etc. still match.
-            // ------------------------------------------------------------------
-            var configuredMode = (GetParameter(RebalanceModeParameter, DefaultRebalanceMode) ?? DefaultRebalanceMode)
-                .Trim()
-                .ToLowerInvariant();
-
-            if (configuredMode == RebalanceModeWeeklyTest || configuredMode == RebalanceModeMonthly)
-            {
-                _rebalanceMode = configuredMode;
-            }
-            else
-            {
-                // Unrecognised value (e.g. a typo): fall back to the default
-                // rather than crash the algorithm, but make it loud in the log
-                // so the misconfiguration is noticed.
-                Error($"[Config] Unrecognised {RebalanceModeParameter} '{configuredMode}' — " +
-                      $"expected '{RebalanceModeWeeklyTest}' or '{RebalanceModeMonthly}'. " +
-                      $"Falling back to '{DefaultRebalanceMode}'.");
-                _rebalanceMode = DefaultRebalanceMode;
-            }
-
-            // Log the active mode at startup so it is visible in the journal
+            // Log the active schedule at startup so it is visible in the journal
             // right next to the "DualMomentumV2 Initialized" line make verify checks.
-            Log($"Rebalance mode    : {_rebalanceMode}" +
-                (_rebalanceMode == RebalanceModeWeeklyTest
-                    ? " (TEST: every Monday 10:00 ET, Day market orders)"
-                    : " (first trading day of month 15:40 ET, Day market orders)"));
+            Log($"Rebalance schedule: first trading day of month {RebalanceHourEt:D2}:{RebalanceMinuteEt:D2} ET, Day market orders");
 
-            if (_rebalanceMode == RebalanceModeWeeklyTest)
-            {
-                // ── weekly-test: every Monday at 10:00 ET ──────────────────────
-                // DateRules.Every(DayOfWeek.Monday) is NOT exchange-calendar
-                // aware (upstream LEAN implements it as a plain day-of-week
-                // filter over calendar days), so it also fires on Monday market
-                // holidays. The IsMarketOpen() guard below skips those days
-                // instead of submitting orders into a closed market.
-                // 10:00 ET (30 min after the open) avoids the opening auction.
-                Schedule.On(
-                    DateRules.Every(DayOfWeek.Monday),
-                    TimeRules.At(10, 0),
-                    () =>
+            // ------------------------------------------------------------------
+            // Monthly rebalance: FIRST TRADING DAY of each month at 10:00 ET.
+            //
+            // Date rule -- DateRules.MonthStart(symbol): LEAN resolves this
+            // against the symbol's SecurityExchangeHours (market-hours
+            // database). It fires on the 1st of the month if the exchange is
+            // open that day, otherwise on the next trading day, so weekends
+            // and NYSE holidays (e.g. Jan 1) roll forward automatically.
+            // Verified by reading DateRules.MonthStart/GetScheduledDay at the
+            // LEAN commit pinned in setup/06_lean_build.sh (c88955b9).
+            //
+            // Reference symbol -- SPY (AbsMomReferenceTicker), looked up from
+            // _symbols (populated by the AddEquity loop above). The original
+            // schedule used Securities.Keys.First(), which picks whichever key
+            // the SecurityManager enumerates first; that only worked because
+            // every universe symbol is a US equity on the same NYSE calendar.
+            // Naming SPY makes the calendar choice explicit and deterministic
+            // while producing the same dates.
+            //
+            // Time rule -- TimeRules.At(10, 0) in the algorithm's time zone
+            // (America/New_York, LEAN's default). Kept from the PR #51 weekly
+            // paper fill test; see RebalanceHourEt for why.
+            //
+            // Orders -- Rebalance() submits immediate Day MarketOrder()s
+            // (Alpaca time_in_force=day). Do NOT switch back to
+            // MarketOnCloseOrder() + 15:40 ET: that combination expired
+            // unfilled on 2026-10-01 (see DEVIATIONS.md).
+            // ------------------------------------------------------------------
+            Schedule.On(
+                DateRules.MonthStart(_symbols[AbsMomReferenceTicker]),
+                TimeRules.At(RebalanceHourEt, RebalanceMinuteEt),
+                () =>
+                {
+                    // Safety guard against duplicate execution within the
+                    // same calendar month (e.g. if the event were ever
+                    // re-registered). Reset to -1 by the force-rebalance
+                    // trigger below.
+                    if (Time.Month != _lastRebalanceMonth)
                     {
-                        // Skip Monday market holidays (exchange closed).
-                        if (!IsMarketOpen(AbsMomReferenceTicker))
-                        {
-                            Log($"[Rebalance] Weekly-test trigger skipped on {Time:yyyy-MM-dd}: market closed.");
-                            return;
-                        }
-
-                        // Safety guard against duplicate execution on the same day.
-                        if (Time.Date == _lastWeeklyRebalanceDate) return;
-                        _lastWeeklyRebalanceDate = Time.Date;
-
-                        Log($"[Rebalance] Triggered on {Time:yyyy-MM-dd HH:mm} (weekly-test mode, Monday 10:00 ET)");
+                        // Remember that this month's rebalance has run.
+                        _lastRebalanceMonth = Time.Month;
+                        // Log the trigger with date AND time so the journal
+                        // shows exactly when the scheduled event fired.
+                        Log($"[Rebalance] Triggered on {Time:yyyy-MM-dd HH:mm} (first trading day of {Time:MMMM yyyy})");
+                        // Run the rebalance (Day market orders).
                         Rebalance();
                     }
-                );
-            }
-            else
-            {
-                // ── monthly: first trading day of each month at 3:40 PM ET ────
-                // This is the pre-2026-10-01 schedule, unchanged. The 3:40 PM
-                // time was originally chosen (2026-09-02) to beat LEAN's
-                // 15:44:30 MarketOnCloseOrder submission cutoff. Rebalance now
-                // uses Day MarketOrder()s, so that cutoff no longer applies; the
-                // time is kept as-is so "monthly" means exactly the previous
-                // schedule. See DEVIATIONS.md.
-                Schedule.On(
-                    DateRules.MonthStart(Securities.Keys.First()),
-                    TimeRules.At(15, 40),
-                    () => {
-                        // Safety guard against duplicate execution.
-                        if (Time.Month != _lastRebalanceMonth)
-                        {
-                            _lastRebalanceMonth = Time.Month;
-                            Log($"[Rebalance] Triggered on {Time:yyyy-MM-dd} (first trading day of {Time:MMMM yyyy})");
-                            Rebalance();
-                        }
-                    }
-                );
-            }
+                }
+            );
 
             // Poll every minute during market hours for a manual rebalance trigger file.
             // To trigger: touch /tmp/force_rebalance on the Pi.
-            // Rebalance() always uses immediate Day MarketOrder()s now, so this
-            // behaves identically to a scheduled rebalance in either mode.
+            // Rebalance() always uses immediate Day MarketOrder()s, so this
+            // behaves identically to the scheduled monthly rebalance.
             Schedule.On(
                 DateRules.EveryDay(),
                 TimeRules.Every(TimeSpan.FromMinutes(1)),
@@ -499,8 +442,8 @@ namespace PiAiTrader.Strategies
         ///   1. Updating the peak portfolio value tracker.
         ///   2. Checking per-position stop-losses.
         ///   3. Evaluating max-drawdown halt condition.
-        /// Note: Rebalancing is handled via Schedule.On() (weekly-test or monthly mode,
-        /// see Initialize()), not in OnData().
+        /// Note: Rebalancing is handled via Schedule.On() (first trading day of
+        /// each month at 10:00 ET, see Initialize()), not in OnData().
         /// </summary>
         public override void OnData(Slice data)
         {
@@ -541,7 +484,8 @@ namespace PiAiTrader.Strategies
         // =====================================================================
 
         /// <summary>
-        /// Core rebalance logic (run on the weekly-test or monthly schedule).
+        /// Core rebalance logic (run on the monthly schedule or by the manual
+        /// /tmp/force_rebalance trigger).
         /// Steps:
         ///   A. Run the absolute momentum filter (SPY vs AGG over 12 months).
         ///      → If risk-off: move 100% to AGG.
