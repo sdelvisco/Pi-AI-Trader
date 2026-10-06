@@ -274,10 +274,137 @@ def positions():
 # Trade history endpoint
 # ---------------------------------------------------------------------------
 
+def _collapse_order_events(events: list) -> list:
+    """
+    Collapse LEAN order events into ONE row per order (keyed on "orderId").
+
+    Why this exists (fixed 2026-10-06):
+      LEAN's order-events file is a list of OrderEvent objects -- one entry
+      per STATUS CHANGE, not one per order. LiveTradingResultHandler writes
+      TransactionHandler.OrderEvents as-is, and each entry carries "orderId"
+      plus a per-order "orderEventId" (see LEAN's SerializedOrderEvent). A
+      market order that fills therefore appears at least twice:
+        {"orderId": 7, "orderEventId": 1, "status": "submitted", "fillPrice": 0, ...}
+        {"orderId": 7, "orderEventId": 2, "status": "filled",    "fillPrice": 112.21, ...}
+      The dashboard rendered every entry as its own Recent Trades row, so on
+      2026-10-05 each of the two real orders (CSCO buy, XLK sell) showed up
+      twice: once "filled" with a price and once "submitted" at $0.00 with
+      the same symbol, quantity and minute -- looking like duplicate orders.
+
+    What it returns:
+      One dict per order, in the order each order was LAST updated (oldest
+      first, matching the input file's chronological order). Each row is a
+      copy of the order's most recent event (so "status" and "time" show the
+      order's current state), with two fields recomputed across ALL of that
+      order's events:
+        - "fillQuantity": total quantity filled across every fill event.
+        - "fillPrice":    quantity-weighted average fill price across every
+                          fill event (0 if nothing has filled yet). For a
+                          single complete fill this is just that fill's price;
+                          for partial fills it is the true average rather
+                          than only the last partial fill's price.
+      "quantity" (the order's requested quantity) is the same on every event
+      of an order, so it is taken from the latest event unchanged.
+
+    Display only: this reads the file and reshapes the JSON response. It
+    does not touch LEAN, the order-events file, or order submission.
+
+    Args:
+        events: Parsed contents of a LEAN *-order-events.json file (a list of
+                order-event dicts, oldest first).
+
+    Returns:
+        A new list of per-order dicts, oldest-updated first.
+    """
+    # orderId -> collapsed row. A plain dict keeps insertion order, but we
+    # re-insert on every event (pop + set) so the final iteration order is
+    # "order of each order's LAST event" rather than "first event".
+    rows: dict = {}
+
+    # orderId -> [total filled quantity (absolute), sum of |qty| * price].
+    # Kept separately so the weighted average can be computed at the end.
+    fill_totals: dict = {}
+
+    # Events without an orderId cannot be grouped; keep each one as its own
+    # row (under a unique synthetic key) rather than silently dropping it.
+    ungrouped_counter = 0
+
+    for event in events:
+        # Skip anything that is not an object (defensive: malformed file).
+        if not isinstance(event, dict):
+            continue
+
+        order_id = event.get("orderId")
+        if order_id is None:
+            # Unique key so ungrouped events never merge with each other.
+            key = ("ungrouped", ungrouped_counter)
+            ungrouped_counter += 1
+        else:
+            key = order_id
+            # When two events for one order are out of sequence in the file,
+            # keep the one with the higher orderEventId as "latest". Events
+            # without an orderEventId fall back to file order (later wins).
+            previous = rows.get(key)
+            if previous is not None:
+                prev_seq = previous.get("orderEventId")
+                this_seq = event.get("orderEventId")
+                if isinstance(prev_seq, int) and isinstance(this_seq, int) and this_seq < prev_seq:
+                    # Older event arriving late: still count its fill below,
+                    # but do not let it replace the newer status/time.
+                    event_is_latest = False
+                else:
+                    event_is_latest = True
+            else:
+                event_is_latest = True
+
+            # Accumulate fills from EVERY event of the order, whichever
+            # event ends up being the displayed one. LEAN signs fillQuantity
+            # by direction (negative for sells), so use the absolute value
+            # for weighting; direction is shown separately.
+            try:
+                fill_qty = abs(float(event.get("fillQuantity") or 0))
+                fill_px = float(event.get("fillPrice") or 0)
+            except (TypeError, ValueError):
+                fill_qty, fill_px = 0.0, 0.0
+            if fill_qty > 0:
+                totals = fill_totals.setdefault(key, [0.0, 0.0])
+                totals[0] += fill_qty
+                totals[1] += fill_qty * fill_px
+
+            if not event_is_latest:
+                continue
+
+        # Re-insert so this order moves to the end (most recently updated).
+        rows.pop(key, None)
+        rows[key] = dict(event)  # copy: never mutate the parsed file data
+
+    # Apply the accumulated fill totals to each grouped row.
+    for key, row in rows.items():
+        totals = fill_totals.get(key)
+        if totals is None:
+            # No fills at all (e.g. still "submitted", or "canceled"/"invalid").
+            # Leave the latest event's own fillPrice/fillQuantity (normally 0).
+            continue
+        total_qty, notional = totals
+        # Restore the sign convention LEAN uses (negative for sells) using the
+        # latest event's own fillQuantity/quantity sign.
+        sign_source = row.get("quantity") or row.get("fillQuantity") or 1
+        try:
+            sign = -1 if float(sign_source) < 0 else 1
+        except (TypeError, ValueError):
+            sign = 1
+        row["fillQuantity"] = sign * total_qty
+        row["fillPrice"] = round(notional / total_qty, 6)
+
+    return list(rows.values())
+
+
 @api_bp.route("/trades")
 def trades():
     """
-    Returns recent order/trade history from the LEAN order-events file.
+    Returns recent order/trade history from the LEAN order-events file,
+    one row per order (the file's per-status-change events are collapsed
+    by orderId -- see _collapse_order_events()).
 
     LEAN writes order events to a file named:
       DualMomentumV2-<date>-order-events.json
@@ -310,9 +437,15 @@ def trades():
     if data is None:
         return jsonify({"trades": [], "message": "Could not parse order-events file"})
 
-    # Return the most recent 50 order events, newest first.
-    trade_list = data if isinstance(data, list) else []
-    return jsonify({"trades": trade_list[-50:][::-1]})
+    # The file holds one entry per order STATUS CHANGE (submitted, filled,
+    # ...), not one per order. Collapse them to one row per orderId so a
+    # filled order no longer also shows a stale "submitted @ $0.00" row
+    # (see _collapse_order_events above for details).
+    event_list = data if isinstance(data, list) else []
+    order_rows = _collapse_order_events(event_list)
+
+    # Return the 50 most recently updated orders, newest first.
+    return jsonify({"trades": order_rows[-50:][::-1]})
 
 
 # ---------------------------------------------------------------------------
