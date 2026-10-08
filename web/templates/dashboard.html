@@ -29,11 +29,16 @@
         </div>
     </div>
 
-    <!-- Daily P&L -->
+    <!-- Unrealized P&L
+         Sum of LEAN's "u" (unrealized P&L) across open positions, measured
+         against each position's average cost since purchase. It is NOT a
+         daily figure and excludes realized P&L from closed positions, so it
+         is labelled "Unrealized P&L" (was "Daily P&L" before 2026-10-08).
+         The element id is kept as card-daily-pnl so nothing else changes. -->
     <div class="col-6 col-lg-3">
         <div class="card bg-black border-secondary h-100">
             <div class="card-body">
-                <div class="text-muted-light small">Daily P&amp;L</div>
+                <div class="text-muted-light small">Unrealized P&amp;L</div>
                 <div class="fs-5 fw-bold" id="card-daily-pnl">—</div>
             </div>
         </div>
@@ -241,12 +246,16 @@ function refreshPositions() {
                 </tr>`;
             }).join("");
 
-            // Update portfolio value card
+            // Update portfolio value card. total_portfolio_value is computed
+            // server-side as cash + sum(quantity * price); see positions() in
+            // web/routes/api.py for why LEAN's own "v" field is not used.
             const portfolioValue = data.total_portfolio_value || 0;
             document.getElementById("card-portfolio-value").textContent =
                 `$${portfolioValue.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
 
-            // Calculate and update daily P&L card (sum of all unrealized P&L)
+            // Update the Unrealized P&L card: sum of every open position's
+            // unrealized P&L since purchase (not a daily figure -- see the
+            // card's HTML comment above).
             const totalPnL = positions.reduce((sum, p) => sum + (p.unrealized_pnl || 0), 0);
             const pnlElement = document.getElementById("card-daily-pnl");
             const pnlClass = totalPnL >= 0 ? "text-success" : "text-danger";

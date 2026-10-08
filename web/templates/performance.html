@@ -72,11 +72,43 @@ fetch("/api/performance")
             return `${parseFloat(val).toFixed(1)}%`;
         }
 
+        // Format a value that is ALREADY a percent (e.g. LEAN's Return
+        // series, where -0.002015804 means -0.002%, not -0.2%) with two
+        // decimals. A tiny value that rounds to zero is shown as "0.00%"
+        // rather than JavaScript's "-0.00%" (toFixed keeps the minus sign
+        // of a small negative number).
+        function fmtPct2(val) {
+            if (val == null) return "N/A";
+            const num = parseFloat(val);
+            if (isNaN(num)) return "N/A";
+            const text = num.toFixed(2);
+            // parseFloat("-0.00") === 0 (and -0 === 0), so this catches
+            // every value that rounds to zero, whatever its sign.
+            return parseFloat(text) === 0 ? "0.00%" : `${text}%`;
+        }
+
+        // Latest value of a simple [time, value] series (LEAN ChartPoint
+        // serialization) -- used for the Return and Drawdown series.
         function latestChartValue(series) {
             if (!series) return null;
             const vals = series.values;
             if (!vals || !vals.length) return null;
             return vals[vals.length - 1][1];
+        }
+
+        // Latest CLOSE of a candlestick series. LEAN serializes each candle
+        // as [time, open, high, low, close] (LEAN CandlestickJsonConverter),
+        // so the close is index 4. Before 2026-10-08 Strategy Equity read
+        // index 1 via latestChartValue(), which is the candle's OPEN.
+        // Returns null (shown as "N/A") if the last point is not an array
+        // of at least 5 elements, rather than guessing which field it is.
+        function latestCandleClose(series) {
+            if (!series) return null;
+            const vals = series.values;
+            if (!vals || !vals.length) return null;
+            const last = vals[vals.length - 1];
+            if (!Array.isArray(last) || last.length < 5) return null;
+            return last[4];
         }
 
         function fmtDuration(start, end) {
@@ -88,7 +120,12 @@ fetch("/api/performance")
             const m = Math.round(s / 60);
             if (m < 60) return `${m} minute${m !== 1 ? "s" : ""}`;
             const h = Math.round(m / 60);
-            return `${h} hour${h !== 1 ? "s" : ""}`;
+            if (h < 48) return `${h} hour${h !== 1 ? "s" : ""}`;
+            // Uptime can run for weeks; show days + hours past 48 hours
+            // instead of e.g. "500 hours".
+            const d = Math.floor(h / 24);
+            const rh = h % 24;
+            return `${d} days${rh ? ` ${rh} hour${rh !== 1 ? "s" : ""}` : ""}`;
         }
 
         // Account Currency
@@ -100,9 +137,14 @@ fetch("/api/performance")
         const cashAmount = safeGet(perf, "cash", "USD", "amount");
         cards.push(metric("Cash Balance", fmtCurrency(cashAmount, symbol || "$")));
 
-        // Holdings Count
-        const holdingsCount = perf.holdings ? Object.keys(perf.holdings).length : 0;
-        cards.push(metric("Holdings", holdingsCount));
+        // Open Positions: holdings with a nonzero quantity ("q") only.
+        // The 10-minute file's "holdings" lists EVERY subscribed security
+        // (all 44 universe tickers, mostly q = 0), so counting its keys
+        // (as the old "Holdings" card did) showed 44 with one open position.
+        const openPositions = perf.holdings
+            ? Object.values(perf.holdings).filter(h => h && Number(h.q || 0) !== 0).length
+            : 0;
+        cards.push(metric("Open Positions", openPositions));
 
         // Status
         const status = safeGet(perf, "state", "Status") || "N/A";
@@ -111,28 +153,46 @@ fetch("/api/performance")
             : "text-warning";
         cards.push(metric("Status", status, statusColor));
 
-        // Order Count
+        // Order Count and Log Count are LEAN in-process counters
+        // (state.OrderCount / state.LogCount) that reset to 0 every time
+        // the engine restarts, so the labels say so. Orders placed by an
+        // earlier engine run still appear in the Dashboard's Recent Trades.
         const orderCount = safeGet(perf, "state", "OrderCount") || "0";
-        cards.push(metric("Order Count", orderCount));
+        cards.push(metric("Orders (since engine start)", orderCount));
 
-        // Log Count
         const logCount = safeGet(perf, "state", "LogCount");
-        cards.push(metric("Log Count", logCount != null ? logCount : "N/A"));
+        cards.push(metric("Log Lines (since engine start)", logCount != null ? logCount : "N/A"));
 
-        // Runtime Duration
+        // Uptime (replaces "Duration", which was always N/A while running
+        // because LEAN leaves state.EndTime empty until the engine stops):
+        //   - EndTime set           -> EndTime - StartTime (finished run)
+        //   - EndTime empty+Running -> now - StartTime (browser clock)
+        //   - anything else, or StartTime missing/unparseable -> N/A
+        //     (fmtDuration returns N/A for a missing or unparseable time).
         const startTime = safeGet(perf, "state", "StartTime");
         const endTime = safeGet(perf, "state", "EndTime");
-        cards.push(metric("Duration", fmtDuration(startTime, endTime)));
+        let uptimeEnd = null;
+        if (endTime) {
+            uptimeEnd = endTime;
+        } else if (status === "Running") {
+            uptimeEnd = new Date().toISOString();
+        }
+        cards.push(metric("Uptime", fmtDuration(startTime, uptimeEnd)));
 
-        // Strategy Equity (latest value)
+        // Strategy Equity: CLOSE of the latest equity candle (see
+        // latestCandleClose for why not index 1).
         const equitySeries = safeGet(perf, "charts", "Strategy Equity", "series", "Equity");
-        const equityVal = latestChartValue(equitySeries);
+        const equityVal = latestCandleClose(equitySeries);
         cards.push(metric("Strategy Equity", equityVal != null ? fmtCurrency(equityVal, symbol || "$") : "N/A"));
 
-        // Return %
+        // Daily Return: LEAN's "Return" series is the DAILY performance
+        // percent (change vs. the previous daily sample), not a cumulative
+        // return since inception, so it is labelled "Daily Return". The
+        // value is already a percent; fmtPct2 shows 2 decimals and never
+        // "-0.00%".
         const returnSeries = safeGet(perf, "charts", "Strategy Equity", "series", "Return");
         const returnVal = latestChartValue(returnSeries);
-        cards.push(metric("Return", returnVal != null ? fmtPct(returnVal) : "N/A"));
+        cards.push(metric("Daily Return", returnVal != null ? fmtPct2(returnVal) : "N/A"));
 
         // Drawdown
         const drawdownSeries = safeGet(perf, "charts", "Drawdown", "series", "Equity Drawdown");
