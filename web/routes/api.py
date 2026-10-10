@@ -112,12 +112,14 @@ def positions():
       "a"  = average price
       "q"  = quantity
       "p"  = last price
-      "v"  = market value
+      "v"  = market value (truncated to a whole dollar above 100 by LEAN,
+             so it is NOT used for display -- market value is computed
+             as q * p instead; see the NOTE in the parsing step below)
       "u"  = unrealized P&L
       "up" = unrealized P&L percent
 
     Cash is reported under cash.USD.amount; total portfolio value is
-    the sum of all position market values plus the cash balance.
+    the cash balance plus the sum of q * p over all open positions.
     """
     results_dir = _lean_results_dir()
 
@@ -232,6 +234,21 @@ def positions():
 
     # -------------------------------------------------------------------
     # Parse holdings using LEAN's abbreviated key schema.
+    #
+    # NOTE (fixed 2026-10-08): market_value used to be LEAN's "v" field
+    # as-is. LEAN does NOT store an exact market value there: the
+    # Holding.MarketValue setter passes the value through
+    # SmartRoundingShort(), which returns Math.Truncate(value) for any
+    # value above 100 (LEAN Common/Global.cs Holding.MarketValue and
+    # Common/Extensions.cs SmartRoundingShort, at the LEAN commit pinned
+    # in setup/06_lean_build.sh). A 1-share CSCO position at $112.87 was
+    # therefore stored as "v": 112, so the dashboard showed Mkt Value
+    # $112.00 and Portfolio Value $991.27 while LEAN's own Strategy
+    # Equity was $992.14 -- confirmed with the live Pi files on
+    # 2026-10-08. "q" (quantity) and "p" (price, rounded only to the
+    # symbol's tick size) are not truncated, so the market value is now
+    # computed here as q * p. A negative q (short) gives a negative
+    # market value, the same sign convention LEAN uses for "v".
     # -------------------------------------------------------------------
     holdings = data.get("holdings", {})
     positions_list = [
@@ -241,7 +258,9 @@ def positions():
             "quantity":         holding.get("q", 0),
             "average_price":    holding.get("a", 0),
             "last_price":       holding.get("p", 0),
-            "market_value":     holding.get("v", 0),
+            # Exact value from quantity x price, rounded to cents (NOT the
+            # whole-dollar-truncated "v" -- see the NOTE above).
+            "market_value":     round(holding.get("q", 0) * holding.get("p", 0), 2),
             "unrealized_pnl":   holding.get("u", 0),
             "unrealized_pnl_pct": holding.get("up", 0),
         }
@@ -258,8 +277,11 @@ def positions():
             .get("USD", {})
             .get("amount", 0)
     )
+    # Portfolio value = cash + sum(q * p) over open positions. Summed from
+    # the per-position values above (already q * p, not "v"), then rounded
+    # once more so float noise (e.g. 992.1400000000001) never reaches the UI.
     total_market_value = sum(p["market_value"] for p in positions_list)
-    total_portfolio_value = total_market_value + cash_usd
+    total_portfolio_value = round(total_market_value + cash_usd, 2)
 
     return jsonify(
         {
