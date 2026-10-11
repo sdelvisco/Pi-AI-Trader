@@ -181,6 +181,36 @@ namespace PiAiTrader.Strategies
         private const decimal MinAdjustmentFraction = 0.005m;
 
         // =====================================================================
+        // ██  ORDER FILL WAITS  ──────────────────────────────────────────────
+        // Real Alpaca paper fills took about 5-7 s from pending_new to fill on
+        // 2026-10-05 (XLK sell ~4.9 s, CSCO buy ~6.8 s), while LEAN's live
+        // MarketOrder() wait is only 5 s (SecurityTransactionManager.SetLiveMode
+        // sets MarketOrderFillTimeout = 5 s in the pinned LEAN source), so
+        // waits could time out just before the fill arrived. Rebalance,
+        // liquidation, risk-off and drawdown-halt orders are therefore
+        // submitted asynchronously and waited for here instead, with a longer
+        // per-order limit and a total cap per rebalance.
+        // =====================================================================
+
+        /// <summary>
+        /// LEAN's default live wait for a synchronous MarketOrder(), in
+        /// seconds. Kept for reference and logging only; the stop-loss path
+        /// still uses synchronous MarketOrder() and therefore this wait.
+        /// </summary>
+        private const int LeanDefaultMarketOrderWaitSeconds = 5;
+
+        /// <summary>
+        /// Longest wait for one order, in seconds, measured from its submission.
+        /// </summary>
+        private const int OrderFillWaitSeconds = 30;
+
+        /// <summary>
+        /// Longest total time, in seconds, that one rebalance (or one drawdown
+        /// halt) spends waiting for fills across all of its orders.
+        /// </summary>
+        private const int RebalanceFillWaitBudgetSeconds = 120;
+
+        // =====================================================================
         // ██  REBALANCE SCHEDULE  ────────────────────────────────────────────
         // Monthly: first trading day of each month at 10:00 ET (exchange time).
         // The date rule lives in Initialize() (DateRules.MonthStart on SPY);
@@ -432,6 +462,19 @@ namespace PiAiTrader.Strategies
         private readonly Dictionary<Symbol, decimal> _sizingPriceBySymbol = new Dictionary<Symbol, decimal>();
         private readonly object _sizingPriceLock = new object();
 
+        // Submission time (Stopwatch timestamp) of each order placed through
+        // PlaceSizedMarketOrder(), by LEAN order id, so the wait loop can
+        // enforce the per-order limit and log the elapsed seconds. Guarded by
+        // _sizingPriceLock: in live trading the stop-loss (OnData, main
+        // thread) and the rebalance (scheduled event, RealTime thread) can
+        // both place orders.
+        private readonly Dictionary<int, long> _orderSubmittedAt = new Dictionary<int, long>();
+
+        // Total time spent waiting for fills in the current rebalance or
+        // drawdown halt. Restarted at the start of each Rebalance() and each
+        // triggered drawdown halt; checked against RebalanceFillWaitBudgetSeconds.
+        private System.Diagnostics.Stopwatch _fillWaitSpent = new System.Diagnostics.Stopwatch();
+
         // =====================================================================
         // ██  INITIALIZE  ─────────────────────────────────────────────────────
         // =====================================================================
@@ -512,6 +555,8 @@ namespace PiAiTrader.Strategies
             Log($"Fractional sizing : {(UseFractionalSizing ? "ON" : "OFF")}, sizing lot size {_sizingLotSize} share");
             Log($"Cash reserve      : {CashReserveFraction:P1} of portfolio value at each rebalance");
             Log($"Min order / adj.  : new buys >= ${MinOrderNotional:F2}; adjustments >= max(${MinOrderNotional:F2}, {MinAdjustmentFraction:P1} of portfolio)");
+            Log($"Fill waits        : up to {OrderFillWaitSeconds}s per order, {RebalanceFillWaitBudgetSeconds}s total per rebalance " +
+                $"(LEAN default {LeanDefaultMarketOrderWaitSeconds}s; stop-loss orders keep the LEAN default)");
 
             // Log the active schedule at startup so it is visible in the journal
             // right next to the "DualMomentumV2 Initialized" line make verify checks.
@@ -666,6 +711,9 @@ namespace PiAiTrader.Strategies
             // unconditionally printing "[Rebalance] Complete".
             var tickets = new List<OrderTicket>();
 
+            // Fresh fill-wait budget for this rebalance (see ORDER FILL WAITS).
+            _fillWaitSpent = new System.Diagnostics.Stopwatch();
+
             // ------------------------------------------------------------------
             // A. ABSOLUTE MOMENTUM FILTER
             //    Compare SPY 12-month return vs AGG 12-month return.
@@ -695,6 +743,10 @@ namespace PiAiTrader.Strategies
                 // helper below waits for these sells before sizing the AGG buy.
                 var defLiquidationTickets = LiquidateAllExcept(DefensiveTicker);
                 tickets.AddRange(defLiquidationTickets);
+                // Wait for the sells (up to OrderFillWaitSeconds each) before
+                // anything is sized; the ones not filled are excluded from the
+                // sizing base below.
+                var defUnsoldTickets = WaitForTickets(defLiquidationTickets, "[Rebalance]", "liquidation", "sell");
                 // Use an explicit MarketOrder instead of SetHoldings() so that
                 // the Day TimeInForce on DefaultOrderProperties is respected
                 // and the order is not downgraded to a MarketOnOpen by the
@@ -713,7 +765,7 @@ namespace PiAiTrader.Strategies
                     {
                         new AllocationTarget(DefensiveTicker, defSym, 1.0m)
                     };
-                    var defResult = ExecuteAllocation(defTargets, defLiquidationTickets,
+                    var defResult = ExecuteAllocation(defTargets, defUnsoldTickets,
                         AllocationContext.Defensive, 1.0m);
                     tickets.AddRange(defResult.Tickets);
                     defOrdersSubmitted = defResult.OrdersSubmitted;
@@ -780,6 +832,10 @@ namespace PiAiTrader.Strategies
             // ------------------------------------------------------------------
             var liquidationTickets = LiquidateAllExcept(topTickers);
             tickets.AddRange(liquidationTickets);
+            // Wait for the sells (up to OrderFillWaitSeconds each, all at
+            // once) before anything is sized; the ones not filled are excluded
+            // from the sizing base in ExecuteAllocation().
+            var unsoldTickets = WaitForTickets(liquidationTickets, "[Rebalance]", "liquidation", "sell");
 
             // Logging-only bookkeeping for the "[Rebalance] Complete" summary:
             // per-reason count of selected symbols that got no order, and
@@ -874,7 +930,7 @@ namespace PiAiTrader.Strategies
 
             // Sells first (liquidations, then down-adjustments), wait, then
             // buys capped at available cash -- see ExecuteAllocation().
-            var result = ExecuteAllocation(targets, liquidationTickets, AllocationContext.RiskOn, baseWeight);
+            var result = ExecuteAllocation(targets, unsoldTickets, AllocationContext.RiskOn, baseWeight);
             tickets.AddRange(result.Tickets);
             selectedOrdersSubmitted += result.OrdersSubmitted;
             foreach (var kv in result.SkipCounts)
@@ -902,17 +958,20 @@ namespace PiAiTrader.Strategies
         // ██  FRACTIONAL ALLOCATION ENGINE  ──────────────────────────────────
         // Shared by the risk-on rebalance, the risk-off (100% AGG) rebalance
         // and the drawdown halt (100% AGG). Order of operations:
-        //   1. Wait for the liquidation sells the caller already submitted.
-        //      If any did not fill, its value is excluded from the sizing base
-        //      (an error-level line names it) and every buy stays capped by
-        //      the cash actually available.
+        //   1. The caller has already submitted the liquidation sells and
+        //      waited for them (WaitForTickets). Any that did not fill are
+        //      passed in; their value is excluded from the sizing base and
+        //      every buy stays capped by the cash actually available.
         //   2. investable = (TotalPortfolioValue - unsold value) x (1 - reserve).
         //   3. Per target: targetValue = weight x investable; targetQty =
         //      floor(targetValue / price) to the lot size; delta = targetQty -
         //      held (decimal). Small adjustments are skipped.
         //   4. Sell adjustments first, wait for them.
         //   5. Buys in the caller's order (rank order), each capped at
-        //      Portfolio.Cash - reserve cash - value of earlier unfilled buys.
+        //      Portfolio.Cash - reserve cash - value of earlier unfilled buys,
+        //      and each waited for before the next buy is sized.
+        // Waits use WaitForTickets(): up to OrderFillWaitSeconds per order and
+        // RebalanceFillWaitBudgetSeconds in total per rebalance.
         // Quantities are always rounded DOWN to the lot size, for buys and sells.
         // =====================================================================
 
@@ -984,19 +1043,19 @@ namespace PiAiTrader.Strategies
         // targets. See the FRACTIONAL ALLOCATION ENGINE banner above for the
         // order of operations.
         //   targets            - symbols to allocate to, in the order buys are placed
-        //   liquidationTickets - sells of non-target holdings the caller already submitted
+        //   unsoldTickets      - liquidation sells the caller waited for that did NOT fill
         //   context            - which caller is allocating (selects the log formats)
         //   baseWeight         - base weight before sentiment adjustment (log line only)
         // Returns the tickets placed and the per-reason skip counts.
-        private AllocationResult ExecuteAllocation(List<AllocationTarget> targets, List<OrderTicket> liquidationTickets,
+        private AllocationResult ExecuteAllocation(List<AllocationTarget> targets, List<OrderTicket> unsoldTickets,
             AllocationContext context, decimal baseWeight)
         {
             var result = new AllocationResult();
             // Prefix for this engine's own lines ([Rebalance] or [DrawdownHalt]).
             var prefix = context == AllocationContext.DrawdownHalt ? "[DrawdownHalt]" : "[Rebalance]";
 
-            // ── 1. Wait for the liquidation sells ─────────────────────────────
-            var unsoldTickets = WaitForSells(liquidationTickets, prefix, "liquidation");
+            // ── 1. Liquidation sells: already submitted and waited for by the
+            //       caller; unsoldTickets holds the ones that did not fill. ────
 
             // ── 2. Sizing base, recomputed AFTER the sells ────────────────────
             var tpv = Portfolio.TotalPortfolioValue;
@@ -1123,7 +1182,7 @@ namespace PiAiTrader.Strategies
             var sellAdjustmentTickets = new List<OrderTicket>();
             foreach (var plan in plans.Where(p => p.SkipReason == null && !p.IsBuy))
             {
-                var ticket = PlaceSizedMarketOrder(plan.Target.Symbol, -plan.OrderQty, plan.Price);
+                var ticket = PlaceSizedMarketOrder(plan.Target.Symbol, -plan.OrderQty, plan.Price, true);
                 Log($"{prefix}[ORDER] {plan.Target.Ticker} SELL-ADJUST qty={plan.OrderQty:0.####} " +
                     $"sizingPrice=${plan.Price:F2} notional=${plan.OrderQty * plan.Price:F2} " +
                     $"type={ticket.OrderType} status={ticket.Status}");
@@ -1133,7 +1192,7 @@ namespace PiAiTrader.Strategies
             }
             // Buys below are capped by Portfolio.Cash, so a sell adjustment
             // that has not filled simply leaves less cash for the buys.
-            WaitForSells(sellAdjustmentTickets, prefix, "sell adjustment");
+            WaitForTickets(sellAdjustmentTickets, prefix, "sell adjustment", "sell");
 
             // ── 5. Buys in the caller's order, capped by available cash ───────
             // Earlier buys of this call with their sizing price, so the value
@@ -1178,13 +1237,17 @@ namespace PiAiTrader.Strategies
                     }
                 }
 
-                var ticket = PlaceSizedMarketOrder(sym, buyQty, plan.Price);
+                var ticket = PlaceSizedMarketOrder(sym, buyQty, plan.Price, true);
                 Log($"{prefix}[ORDER] {plan.Target.Ticker} BUY qty={buyQty:0.####} sizingPrice=${plan.Price:F2} " +
                     $"notional=${buyQty * plan.Price:F2} cashBefore=${cash:F2} " +
                     $"type={ticket.OrderType} status={ticket.Status}");
                 placedBuys.Add(new KeyValuePair<OrderTicket, decimal>(ticket, plan.Price));
                 result.Tickets.Add(ticket);
                 result.OrdersSubmitted++;
+                // Wait for this buy before sizing the next one, so the next
+                // cash cap sees the real fill. A buy still open after the wait
+                // is counted as pending (pendingBuyValue) by the next cap.
+                WaitForTickets(new List<OrderTicket> { ticket }, prefix, "buy", "buy");
             }
 
             return result;
@@ -1198,48 +1261,141 @@ namespace PiAiTrader.Strategies
             Log($"{prefix}[SKIP] {ticker} {reason} WARNING: no order — {detail}");
         }
 
-        // Waits for sell tickets to close and returns the ones that are not
-        // Filled. A synchronous MarketOrder() already waited up to
-        // Transactions.MarketOrderFillTimeout (5 s in live); this waits up to
-        // that timeout once more per still-open ticket using LEAN's own
-        // Transactions.WaitForOrder() (SecurityTransactionManager.cs in the
-        // pinned LEAN source). LEAN updates the portfolio before it marks an
-        // order closed (BrokerageTransactionHandler: Portfolio.ProcessFills
-        // runs before the ticket's order event), so Portfolio.Cash already
-        // includes the proceeds once a ticket reports Filled.
-        private List<OrderTicket> WaitForSells(List<OrderTicket> sellTickets, string prefix, string kind)
+        // Waits for order tickets to close and returns the ones that are not
+        // Filled. Each ticket is waited for up to OrderFillWaitSeconds from
+        // its submission, and all waits of one rebalance share a total budget
+        // of RebalanceFillWaitBudgetSeconds (_fillWaitSpent). Tickets are
+        // waited for together, so several sells submitted at once overlap.
+        // The wait uses each ticket's OrderClosed handle (the same mechanism
+        // LEAN's own Transactions.WaitForOrder() uses, SecurityTransactionManager.cs
+        // in the pinned LEAN source) in short slices, so a fill is noticed at
+        // once. LEAN updates the portfolio before it marks an order closed
+        // (BrokerageTransactionHandler: Portfolio.ProcessFills runs before the
+        // ticket's order event), so Portfolio.Cash already includes a fill
+        // once its ticket reports Filled.
+        //   kind - log label, e.g. "liquidation", "sell adjustment", "buy"
+        //   side - "sell" or "buy"; sells that do not fill get the
+        //          SELL-NOT-FILLED error line (cash-limited sizing)
+        private List<OrderTicket> WaitForTickets(List<OrderTicket> orderTickets, string prefix, string kind, string side)
         {
             var notFilled = new List<OrderTicket>();
-            foreach (var ticket in sellTickets)
+            if (orderTickets.Count == 0) return notFilled;
+
+            var perOrderLimitTicks = OrderFillWaitSeconds * System.Diagnostics.Stopwatch.Frequency;
+            var budgetLimit = TimeSpan.FromSeconds(RebalanceFillWaitBudgetSeconds);
+            // Tickets still being waited for.
+            var pending = new List<OrderTicket>(orderTickets);
+            // Why a ticket stopped being waited for without closing.
+            var gaveUpReason = new Dictionary<int, string>();
+
+            _fillWaitSpent.Start();
+            try
             {
-                var closed = ticket.Status == OrderStatus.Filled ||
-                             ticket.Status == OrderStatus.Invalid ||
-                             ticket.Status == OrderStatus.Canceled;
-                if (!closed)
+                while (pending.Count > 0)
                 {
-                    Transactions.WaitForOrder(ticket.OrderId);
+                    var now = System.Diagnostics.Stopwatch.GetTimestamp();
+                    foreach (var ticket in pending.ToList())
+                    {
+                        var closed = ticket.Status == OrderStatus.Filled ||
+                                     ticket.Status == OrderStatus.Invalid ||
+                                     ticket.Status == OrderStatus.Canceled;
+                        if (closed)
+                        {
+                            pending.Remove(ticket);
+                            Log($"{prefix}[WAIT] {ticket.Symbol.Value} {side} {ticket.Status.ToString().ToLowerInvariant()} " +
+                                $"after {SecondsSinceSubmission(ticket):F1}s ({kind}, order {ticket.OrderId})");
+                        }
+                        else if (now - SubmittedAt(ticket) >= perOrderLimitTicks)
+                        {
+                            pending.Remove(ticket);
+                            gaveUpReason[ticket.OrderId] = $"per-order limit {OrderFillWaitSeconds}s";
+                        }
+                    }
+                    if (pending.Count == 0) break;
+                    if (_fillWaitSpent.Elapsed >= budgetLimit)
+                    {
+                        // Total budget for this rebalance is used up: stop
+                        // waiting for everything that is still open.
+                        foreach (var ticket in pending)
+                        {
+                            gaveUpReason[ticket.OrderId] = $"rebalance wait budget {RebalanceFillWaitBudgetSeconds}s used up";
+                        }
+                        pending.Clear();
+                        break;
+                    }
+                    // Block on the first open ticket for a short slice; returns
+                    // early as soon as that order closes.
+                    pending[0].OrderClosed.WaitOne(TimeSpan.FromMilliseconds(100));
+                }
+            }
+            finally
+            {
+                _fillWaitSpent.Stop();
+            }
+
+            foreach (var ticket in orderTickets)
+            {
+                if (gaveUpReason.TryGetValue(ticket.OrderId, out var reason))
+                {
+                    Error($"{prefix}[WAIT] {ticket.Symbol.Value} {side} NOT FILLED after {SecondsSinceSubmission(ticket):F1}s " +
+                          $"({reason}; {kind}, order {ticket.OrderId}, status={ticket.Status}, " +
+                          $"filled={ticket.QuantityFilled:0.#########} of {ticket.Quantity:0.#########}); " +
+                          $"total wait so far {_fillWaitSpent.Elapsed.TotalSeconds:F1}s");
                 }
                 if (ticket.Status != OrderStatus.Filled)
                 {
                     notFilled.Add(ticket);
-                    Error($"{prefix}[SELL-NOT-FILLED] {ticket.Symbol.Value} {kind} order {ticket.OrderId} status={ticket.Status} " +
-                          $"qty={ticket.Quantity:0.#########} filled={ticket.QuantityFilled:0.#########} type={ticket.OrderType}; " +
-                          "its value is not counted as cash and buys are capped by actual Portfolio.Cash");
+                    if (side == "sell")
+                    {
+                        Error($"{prefix}[SELL-NOT-FILLED] {ticket.Symbol.Value} {kind} order {ticket.OrderId} status={ticket.Status} " +
+                              $"qty={ticket.Quantity:0.#########} filled={ticket.QuantityFilled:0.#########} type={ticket.OrderType}; " +
+                              "its value is not counted as cash and buys are capped by actual Portfolio.Cash");
+                    }
                 }
             }
             return notFilled;
         }
 
+        // Submission timestamp recorded by PlaceSizedMarketOrder(); a ticket
+        // placed some other way counts as submitted now.
+        private long SubmittedAt(OrderTicket ticket)
+        {
+            lock (_sizingPriceLock)
+            {
+                if (_orderSubmittedAt.TryGetValue(ticket.OrderId, out var submittedAt)) return submittedAt;
+                var now = System.Diagnostics.Stopwatch.GetTimestamp();
+                _orderSubmittedAt[ticket.OrderId] = now;
+                return now;
+            }
+        }
+
+        // Seconds since the ticket's order was submitted, for the WAIT lines.
+        private double SecondsSinceSubmission(OrderTicket ticket)
+        {
+            var ticks = System.Diagnostics.Stopwatch.GetTimestamp() - SubmittedAt(ticket);
+            return (double)ticks / System.Diagnostics.Stopwatch.Frequency;
+        }
+
         // Records the sizing price for the slippage log in OnOrderEvent(),
         // then submits an immediate Day market order (Alpaca
         // time_in_force=day) for the signed quantity.
-        private OrderTicket PlaceSizedMarketOrder(Symbol sym, decimal signedQuantity, decimal sizingPrice)
+        //   asynchronous - true: return at once and let WaitForTickets() do
+        //                  the (longer, budgeted) wait; false: LEAN's own
+        //                  synchronous wait of up to 5 s in live trading
+        //                  (used by the stop-loss path, unchanged).
+        private OrderTicket PlaceSizedMarketOrder(Symbol sym, decimal signedQuantity, decimal sizingPrice, bool asynchronous)
         {
             lock (_sizingPriceLock)
             {
                 _sizingPriceBySymbol[sym] = sizingPrice;
             }
-            return MarketOrder(sym, signedQuantity);
+            var submittedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            var ticket = MarketOrder(sym, signedQuantity, asynchronous);
+            lock (_sizingPriceLock)
+            {
+                _orderSubmittedAt[ticket.OrderId] = submittedAt;
+            }
+            return ticket;
         }
 
         // Lot size used to round quantities for one symbol: the sizing lot
@@ -1358,10 +1514,10 @@ namespace PiAiTrader.Strategies
         /// OrderTickets it produced, rather than unconditionally claiming
         /// success.
         ///
-        /// In live mode LEAN's synchronous MarketOrder() blocks for up to
-        /// Transactions.MarketOrderFillTimeout (5 s by default in upstream
-        /// LEAN) waiting for the order to close, so by the time this runs each
-        /// ticket's Status reflects the broker's response so far:
+        /// Rebalance orders are submitted asynchronously and waited for by
+        /// WaitForTickets() (up to 30 s per order, 120 s per rebalance), so
+        /// by the time this runs each ticket's Status reflects the broker's
+        /// response so far:
         ///   Submitted / PartiallyFilled / Filled → broker accepted the order
         ///   Invalid / Canceled                   → rejected or canceled
         ///   anything else (e.g. New)             → no broker acknowledgement yet
@@ -1384,6 +1540,10 @@ namespace PiAiTrader.Strategies
             // never produces a ticket). The accept/reject counting itself is
             // unchanged.
             var selectionSuffix = $" | Selection: {selectionSummary}";
+
+            // Total time this rebalance spent waiting for fills.
+            Log($"[Rebalance][WAIT] total fill wait {_fillWaitSpent.Elapsed.TotalSeconds:F1}s of " +
+                $"{RebalanceFillWaitBudgetSeconds}s budget ({tickets.Count} order(s))");
 
             // How close to 100% invested this run got: cash left after the
             // orders above, as a share of the portfolio. Fills still pending
@@ -1656,7 +1816,7 @@ namespace PiAiTrader.Strategies
                 var sellQty = FloorHeldToLot(sym, heldQty);
                 if (sellQty != 0)
                 {
-                    var stopTicket = PlaceSizedMarketOrder(sym, -sellQty, Securities[sym].Price);
+                    var stopTicket = PlaceSizedMarketOrder(sym, -sellQty, Securities[sym].Price, false);
                     // Order type is logged because LEAN converts a MarketOrder
                     // placed while the exchange is closed into MarketOnOpen
                     // (Alpaca opg), which Alpaca may reject for fractional
@@ -1706,7 +1866,13 @@ namespace PiAiTrader.Strategies
                 // reason as in Rebalance(): Day market orders work at any time
                 // of day, while SetHoldings() under AlpacaBrokerageModel would
                 // emit a MarketOnOpen that is rejected outside 07:00–09:28.
+                // Fresh fill-wait budget for this halt (see ORDER FILL WAITS).
+                _fillWaitSpent = new System.Diagnostics.Stopwatch();
                 var haltLiquidationTickets = LiquidateAllExcept(DefensiveTicker);
+                // Wait for the sells (up to OrderFillWaitSeconds each) before
+                // the AGG buy is sized; also run when AGG has no price so the
+                // sell results are logged.
+                var haltUnsoldTickets = WaitForTickets(haltLiquidationTickets, "[DrawdownHalt]", "liquidation", "sell");
                 var defSym2   = _symbols[DefensiveTicker];
                 var defPrice2 = Securities[defSym2].Price;
                 if (defPrice2 > 0)
@@ -1720,13 +1886,14 @@ namespace PiAiTrader.Strategies
                     {
                         new AllocationTarget(DefensiveTicker, defSym2, 1.0m)
                     };
-                    var haltResult = ExecuteAllocation(haltTargets, haltLiquidationTickets,
+                    var haltResult = ExecuteAllocation(haltTargets, haltUnsoldTickets,
                         AllocationContext.DrawdownHalt, 1.0m);
                     var haltCash = Portfolio.Cash;
                     var haltTpv  = Portfolio.TotalPortfolioValue;
                     Log($"[DrawdownHalt] {DefensiveTicker} allocation: {haltResult.OrdersSubmitted} order(s) placed, " +
                         $"{haltResult.SkipCounts.Values.Sum()} skipped | Cash after: ${haltCash:F2} " +
-                        $"({(haltTpv > 0m ? haltCash / haltTpv : 0m):P1} of portfolio)");
+                        $"({(haltTpv > 0m ? haltCash / haltTpv : 0m):P1} of portfolio) | " +
+                        $"fill waits {_fillWaitSpent.Elapsed.TotalSeconds:F1}s of {RebalanceFillWaitBudgetSeconds}s");
                 }
                 else
                 {
@@ -1876,7 +2043,9 @@ namespace PiAiTrader.Strategies
                     var sellQty = FloorHeldToLot(holding.Symbol, holdQty);
                     if (sellQty != 0)
                     {
-                        var liquidationTicket = PlaceSizedMarketOrder(holding.Symbol, -sellQty, Securities[holding.Symbol].Price);
+                        // Submitted asynchronously; the caller waits for all
+                        // liquidations together with WaitForTickets().
+                        var liquidationTicket = PlaceSizedMarketOrder(holding.Symbol, -sellQty, Securities[holding.Symbol].Price, true);
                         tickets.Add(liquidationTicket);
                         Log($"[Liquidate] Order {ticker} qty={-sellQty:0.####} held={holdQty:0.#########} " +
                             $"notional=${sellQty * Securities[holding.Symbol].Price:F2} " +
@@ -1962,7 +2131,9 @@ namespace PiAiTrader.Strategies
                 }
 
                 // For buys/additions, update entry price to the latest fill price.
-                // For sells/liquidations, remove the entry price record.
+                // For sells, remove the entry price record only once the
+                // position is closed; a partial sell (for example a rebalance
+                // sell adjustment) keeps the position and its stop-loss anchor.
                 if (orderEvent.Direction == OrderDirection.Buy)
                 {
                     // Use the fill price as the stop-loss anchor.
@@ -1971,7 +2142,23 @@ namespace PiAiTrader.Strategies
                 }
                 else if (orderEvent.Direction == OrderDirection.Sell)
                 {
-                    _entryPrices.Remove(sym);
+                    // LEAN applies the fill to the portfolio before it calls
+                    // OnOrderEvent (BrokerageTransactionHandler: ProcessFills
+                    // runs before the algorithm's OnOrderEvent in the pinned
+                    // LEAN source), so this is the quantity after the fill.
+                    // Lot-size aware: anything below one lot is dust that LEAN
+                    // cannot trade, so the position counts as closed.
+                    var remainingQty = Securities.ContainsKey(sym) ? Portfolio[sym].Quantity : 0m;
+                    if (Math.Abs(remainingQty) < LotSizeFor(sym))
+                    {
+                        _entryPrices.Remove(sym);
+                        Log($"[EntryPrice] {sym.Value} position closed (remaining {remainingQty:0.#########}); entry price removed");
+                    }
+                    else
+                    {
+                        Log($"[EntryPrice] {sym.Value} partial sell; {remainingQty:0.#########} still held, " +
+                            $"entry kept at ${_entryPrices.GetValueOrDefault(sym, 0):F2}");
+                    }
                 }
             }
             else if (orderEvent.Status == OrderStatus.Invalid)
