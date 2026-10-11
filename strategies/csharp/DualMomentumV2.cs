@@ -291,6 +291,47 @@ namespace PiAiTrader.Strategies
         private readonly ISignalAggregator _signalAggregator = new SignalAggregator();
 
         // =====================================================================
+        // ██  SKIP / ZERO-PRICE VISIBILITY  ──────────────────────────────────
+        // Logging-only state. Added after the 2026-10-05 rebalance, where
+        // MSFT and AAPL were silently skipped because Securities[sym].Price
+        // was 0 and nothing in the log said so. None of this changes which
+        // orders are placed or how they are sized -- it only reports why a
+        // selected symbol did or did not get an order.
+        // =====================================================================
+
+        // Skip reason: Securities[sym].Price was 0 (or negative), so no
+        // target quantity could be computed and no order was submitted.
+        private const string SkipNoPrice = "NO_PRICE";
+
+        // Skip reason: the symbol was not present in Securities at all.
+        private const string SkipNotInSecurities = "NOT_IN_SECURITIES";
+
+        // Skip reason: weight x TotalPortfolioValue / Price was above 0 but
+        // below 1 share, so the (long) cast truncated the target to 0 and,
+        // with nothing currently held, the delta was 0.
+        private const string SkipTargetTruncatedToZero = "TARGET_TRUNCATED_TO_ZERO";
+
+        // Skip reason: the truncated target quantity equalled the currently
+        // held quantity, so the delta was 0 and no order was needed.
+        private const string SkipAlreadyAtTarget = "ALREADY_AT_TARGET";
+
+        // Fixed display order for the per-reason counts in the
+        // "[Rebalance] Complete" summary, so the line reads the same way
+        // every month regardless of which reason happened first.
+        private static readonly string[] SkipReasonDisplayOrder = new[]
+        {
+            SkipNoPrice, SkipNotInSecurities, SkipTargetTruncatedToZero, SkipAlreadyAtTarget
+        };
+
+        // Rate limiter for the stop-loss zero-price warning. CheckStopLosses()
+        // runs on every OnData() slice (not strictly once per day), so without
+        // this a held position with no price could log the same warning many
+        // times. Maps symbol -> the algorithm date (Time.Date) on which its
+        // warning was last logged; the warning is logged at most once per
+        // symbol per trading day.
+        private readonly Dictionary<Symbol, DateTime> _stopLossNoPriceWarnedOn = new Dictionary<Symbol, DateTime>();
+
+        // =====================================================================
         // ██  INITIALIZE  ─────────────────────────────────────────────────────
         // =====================================================================
 
@@ -537,16 +578,59 @@ namespace PiAiTrader.Strategies
                 // Alpaca brokerage model.
                 var defSym   = _symbols[DefensiveTicker];
                 var defPrice = Securities[defSym].Price;
+                // Logging-only bookkeeping: AGG is the single "selected"
+                // symbol on this path, so it gets the same skip reporting as
+                // the top-N symbols on the risk-on path.
+                var defSkipCounts      = new Dictionary<string, int>();
+                var defOrdersSubmitted = 0;
+                // Timestamp of AGG's last data point (and STALE flag), for the log lines below.
+                var defLastData = DescribeLastData(defSym);
                 if (defPrice > 0)
                 {
-                    var targetQty = (long)(1.0m * Portfolio.TotalPortfolioValue / defPrice);
-                    var delta     = targetQty - (long)Portfolio[defSym].Quantity;
+                    // Read once so the logged value is exactly the one used for sizing.
+                    var defTpv    = Portfolio.TotalPortfolioValue;
+                    // Same math as before: 1.0 x TotalPortfolioValue / price.
+                    // Kept as a separate variable only so the fractional value
+                    // (before the (long) truncation) can be logged.
+                    var defFractionalTarget = 1.0m * defTpv / defPrice;
+                    var targetQty = (long)defFractionalTarget;
+                    var defHeldQty = (long)Portfolio[defSym].Quantity;
+                    var delta     = targetQty - defHeldQty;
                     // Immediate Day market order (Alpaca time_in_force=day).
-                    if (delta != 0) tickets.Add(MarketOrder(defSym, (decimal)delta));
+                    if (delta != 0)
+                    {
+                        tickets.Add(MarketOrder(defSym, (decimal)delta));
+                        defOrdersSubmitted++;
+                    }
+                    // Sizing line: price actually used, portfolio value,
+                    // fractional and truncated target, held quantity, delta.
+                    Log($"[Defensive] Sizing {DefensiveTicker}: price=${defPrice:F2} {defLastData} weight=100.0% " +
+                        $"tpv=${defTpv:F2} target={defFractionalTarget:F4} targetQty={targetQty} " +
+                        $"held={defHeldQty} delta={delta}");
+                    // No order: explain why (benign reasons, Log level with a WARNING token).
+                    if (delta == 0)
+                    {
+                        var reason = targetQty == 0 ? SkipTargetTruncatedToZero : SkipAlreadyAtTarget;
+                        CountSkip(defSkipCounts, reason);
+                        Log($"[Rebalance][SKIP] {DefensiveTicker} {reason} WARNING: no order " +
+                            $"(target={defFractionalTarget:F4} targetQty={targetQty} held={defHeldQty})");
+                    }
+                }
+                else
+                {
+                    // Previously silent: AGG had no usable price, so no AGG
+                    // order could be sized. Liquidations above still went out,
+                    // so the proceeds will sit in cash instead of AGG.
+                    CountSkip(defSkipCounts, SkipNoPrice);
+                    Error($"[Rebalance][SKIP] {DefensiveTicker} {SkipNoPrice} — price=${defPrice:F2} {defLastData}; " +
+                          $"no {DefensiveTicker} order submitted, liquidation proceeds will remain in cash");
                 }
                 Log($"[Defensive] Target: 100% {DefensiveTicker}");
-                // Report whether the broker actually accepted the orders.
-                LogRebalanceOutcome(tickets, $"100% {DefensiveTicker}");
+                // Report whether the broker actually accepted the orders,
+                // plus how the single selected symbol (AGG) was handled.
+                LogRebalanceOutcome(tickets, $"100% {DefensiveTicker}",
+                    FormatSelectionSummary(1, defOrdersSubmitted, defSkipCounts),
+                    defSkipCounts.ContainsKey(SkipNoPrice));
                 return;
             }
 
@@ -596,10 +680,23 @@ namespace PiAiTrader.Strategies
             // ------------------------------------------------------------------
             var tickerWeights = ComputeSentimentAdjustedWeights(topTickers);
 
+            // Logging-only bookkeeping for the "[Rebalance] Complete" summary:
+            // per-reason count of selected symbols that got no order, and
+            // the number of selected symbols that did get an order.
+            var skipCounts             = new Dictionary<string, int>();
+            var selectedOrdersSubmitted = 0;
+
             foreach (var ticker in topTickers)
             {
                 var sym = _symbols[ticker];
                 var weight = tickerWeights.GetValueOrDefault(ticker, PositionWeight);
+                // Sizing details appended to the [Allocate] line below; filled
+                // in by whichever of the three branches below applies.
+                var sizingDetail = "";
+                // Set when this symbol gets no order; null means an order was submitted.
+                string? skipReason = null;
+                // Extra context for the [Rebalance][SKIP] line.
+                var skipDetail = "";
                 // Use an explicit MarketOrder instead of SetHoldings() so that
                 // the Day TimeInForce on DefaultOrderProperties is respected.
                 // Target quantity = weight × TotalPortfolioValue / Price.
@@ -607,21 +704,89 @@ namespace PiAiTrader.Strategies
                 // order needed (mirrors what SetHoldings() does internally).
                 if (Securities.ContainsKey(sym) && Securities[sym].Price > 0)
                 {
-                    var targetQty = (long)(weight * Portfolio.TotalPortfolioValue / Securities[sym].Price);
-                    var delta     = targetQty - (long)Portfolio[sym].Quantity;
+                    // Read price and portfolio value once, so the values
+                    // logged are exactly the ones used for sizing.
+                    var price = Securities[sym].Price;
+                    var tpv   = Portfolio.TotalPortfolioValue;
+                    // Same math as before: weight x TotalPortfolioValue / price,
+                    // truncated by the (long) cast. Kept as a separate variable
+                    // only so the fractional value can be logged.
+                    var fractionalTarget = weight * tpv / price;
+                    var targetQty = (long)fractionalTarget;
+                    var heldQty   = (long)Portfolio[sym].Quantity;
+                    var delta     = targetQty - heldQty;
                     // Immediate Day market order (Alpaca time_in_force=day).
-                    if (delta != 0) tickets.Add(MarketOrder(sym, (decimal)delta));
+                    if (delta != 0)
+                    {
+                        tickets.Add(MarketOrder(sym, (decimal)delta));
+                        selectedOrdersSubmitted++;
+                    }
+                    else
+                    {
+                        // No order. A zero target with nothing held means the
+                        // target was under 1 share; otherwise holdings already
+                        // match the truncated target.
+                        skipReason = targetQty == 0 ? SkipTargetTruncatedToZero : SkipAlreadyAtTarget;
+                        skipDetail = $"target={fractionalTarget:F4} targetQty={targetQty} held={heldQty} " +
+                                     $"(weight={weight:P1} tpv=${tpv:F2} price=${price:F2})";
+                    }
                     // Record the current price as the "entry price" for stop-loss tracking.
                     // (Will be refined by OnOrderEvent fill price — this is a best-effort
                     //  initialisation in case OnOrderEvent is delayed.)
                     _entryPrices[sym] = Securities[sym].Price;
+                    sizingDetail = $"price=${price:F2} {DescribeLastData(sym)} weight={weight:P1} tpv=${tpv:F2} " +
+                                   $"target={fractionalTarget:F4} targetQty={targetQty} held={heldQty} delta={delta}";
                 }
-                Log($"[Allocate] {ticker} → {weight:P1} (base {PositionWeight:P0}, entry ~${_entryPrices.GetValueOrDefault(sym, 0):F2})");
+                else if (!Securities.ContainsKey(sym))
+                {
+                    // Previously silent: symbol missing from Securities entirely.
+                    skipReason   = SkipNotInSecurities;
+                    // held is reported as n/a: Portfolio[sym] looks the symbol
+                    // up in Securities and would throw here, aborting the rebalance.
+                    sizingDetail = $"price=n/a lastData=n/a weight={weight:P1} target=n/a targetQty=n/a " +
+                                   "held=n/a delta=n/a";
+                    skipDetail   = "symbol is not in Securities, cannot size";
+                }
+                else
+                {
+                    // Previously silent: Price was 0 (no data received yet,
+                    // or the price was otherwise unusable), so no target
+                    // quantity could be computed. This is the 2026-10-05
+                    // MSFT/AAPL case.
+                    var zeroPriceLastData = DescribeLastData(sym);
+                    skipReason   = SkipNoPrice;
+                    sizingDetail = $"price=${Securities[sym].Price:F2} {zeroPriceLastData} weight={weight:P1} " +
+                                   $"tpv=${Portfolio.TotalPortfolioValue:F2} target=n/a targetQty=n/a " +
+                                   $"held={(long)Portfolio[sym].Quantity} delta=n/a";
+                    skipDetail   = $"price=${Securities[sym].Price:F2} {zeroPriceLastData}, cannot size";
+                }
+                // Existing prefix kept byte-for-byte (log readers may depend on it);
+                // the sizing fields are appended after " | sizing: ".
+                Log($"[Allocate] {ticker} → {weight:P1} (base {PositionWeight:P0}, entry ~${_entryPrices.GetValueOrDefault(sym, 0):F2})" +
+                    $" | sizing: {sizingDetail}");
+
+                if (skipReason != null)
+                {
+                    CountSkip(skipCounts, skipReason);
+                    if (skipReason == SkipNoPrice || skipReason == SkipNotInSecurities)
+                    {
+                        // Problem cases: the strategy wanted a position and could not size one.
+                        Error($"[Rebalance][SKIP] {ticker} {skipReason} — {skipDetail}; no order submitted");
+                    }
+                    else
+                    {
+                        // Benign cases: sizing worked, the result was simply "no change".
+                        Log($"[Rebalance][SKIP] {ticker} {skipReason} WARNING: no order — {skipDetail}");
+                    }
+                }
             }
 
             // Only claims "Complete" if every order was accepted by the broker.
+            // The selection summary adds how many selected symbols were skipped and why.
             LogRebalanceOutcome(tickets,
-                string.Join(", ", topTickers.Select(t => $"{t}@{tickerWeights.GetValueOrDefault(t, PositionWeight):P1}")));
+                string.Join(", ", topTickers.Select(t => $"{t}@{tickerWeights.GetValueOrDefault(t, PositionWeight):P1}")),
+                FormatSelectionSummary(topTickers.Count, selectedOrdersSubmitted, skipCounts),
+                skipCounts.ContainsKey(SkipNoPrice));
         }
 
         /// <summary>
@@ -643,13 +808,27 @@ namespace PiAiTrader.Strategies
         /// </summary>
         /// <param name="tickets">Every OrderTicket created by this rebalance.</param>
         /// <param name="targetDescription">Human-readable target portfolio for the log line.</param>
-        private void LogRebalanceOutcome(List<OrderTicket> tickets, string targetDescription)
+        /// <param name="selectionSummary">Count of selected symbols, orders submitted for them, and skips by reason.</param>
+        /// <param name="anyNoPriceSkip">True if any selected symbol was skipped for NO_PRICE.</param>
+        private void LogRebalanceOutcome(List<OrderTicket> tickets, string targetDescription,
+            string selectionSummary, bool anyNoPriceSkip)
         {
+            // The selection summary is appended AFTER the existing line text,
+            // so every existing "[Rebalance] Complete ..." prefix is unchanged.
+            // It reports selected symbols that got no order, which the
+            // accepted/rejected counts below cannot show (a skipped symbol
+            // never produces a ticket). The accept/reject counting itself is
+            // unchanged.
+            var selectionSuffix = $" | Selection: {selectionSummary}";
+
             // No orders at all: holdings were already at target (or every
             // price was 0 so nothing could be sized). Nothing to accept.
             if (tickets.Count == 0)
             {
-                Log($"[Rebalance] Complete — no orders needed. Portfolio target: {targetDescription}");
+                var noOrdersLine = $"[Rebalance] Complete — no orders needed. Portfolio target: {targetDescription}{selectionSuffix}";
+                // A NO_PRICE skip means "no orders" was not really "nothing
+                // needed", so raise it to Error() (LEAN has no warning level).
+                if (anyNoPriceSkip) Error(noOrdersLine); else Log(noOrdersLine);
                 return;
             }
 
@@ -668,9 +847,12 @@ namespace PiAiTrader.Strategies
             {
                 // Every order was acknowledged by the broker. Still be explicit
                 // that acceptance != fill.
-                Log($"[Rebalance] Complete — {accepted.Count}/{tickets.Count} orders accepted by broker " +
+                var completeLine = $"[Rebalance] Complete — {accepted.Count}/{tickets.Count} orders accepted by broker " +
                     $"({filled} filled so far; watch [OrderEvent] lines for remaining fills). " +
-                    $"Portfolio target: {targetDescription}");
+                    $"Portfolio target: {targetDescription}{selectionSuffix}";
+                // Same line either way; Error() when a selected symbol could
+                // not be sized for lack of a price (LEAN has no warning level).
+                if (anyNoPriceSkip) Error(completeLine); else Log(completeLine);
                 return;
             }
 
@@ -678,10 +860,74 @@ namespace PiAiTrader.Strategies
             // claim success. Name each problem order so it can be matched to
             // its [OrderEvent] line.
             Error($"[Rebalance] NOT COMPLETE — accepted={accepted.Count}, rejected/canceled={rejected.Count}, " +
-                  $"unconfirmed={unconfirmed.Count} of {tickets.Count} orders. Intended target: {targetDescription}");
+                  $"unconfirmed={unconfirmed.Count} of {tickets.Count} orders. Intended target: {targetDescription}{selectionSuffix}");
             foreach (var t in rejected.Concat(unconfirmed))
             {
                 Error($"[Rebalance]   Order {t.OrderId} {t.Symbol.Value} qty={t.Quantity} status={t.Status}");
+            }
+        }
+
+        // Increments the count for one skip reason (logging-only bookkeeping).
+        private static void CountSkip(Dictionary<string, int> skipCounts, string reason)
+        {
+            skipCounts[reason] = skipCounts.GetValueOrDefault(reason, 0) + 1;
+        }
+
+        // Builds the selection summary appended to the "[Rebalance] Complete"
+        // line, e.g. "5 selected: 2 orders submitted, 3 skipped (2 NO_PRICE,
+        // 1 TARGET_TRUNCATED_TO_ZERO)". Liquidations of holdings that were not
+        // selected are not counted here; they appear in the accepted/total
+        // ticket counts and in their own [Liquidate] lines.
+        private static string FormatSelectionSummary(int selectedCount, int ordersSubmitted, Dictionary<string, int> skipCounts)
+        {
+            // Total number of selected symbols that got no order.
+            var skippedTotal = skipCounts.Values.Sum();
+            var summary = $"{selectedCount} selected: {ordersSubmitted} orders submitted, {skippedTotal} skipped";
+            if (skippedTotal > 0)
+            {
+                // Per-reason counts in a fixed order, omitting reasons with zero.
+                var parts = SkipReasonDisplayOrder
+                    .Where(r => skipCounts.GetValueOrDefault(r, 0) > 0)
+                    .Select(r => $"{skipCounts[r]} {r}");
+                summary += $" ({string.Join(", ", parts)})";
+            }
+            return summary;
+        }
+
+        // Describes the timestamp of a security's last data point for log
+        // lines, e.g. "lastData=2026-10-02 16:00" or
+        // "lastData=2026-10-01 16:00 STALE". Logging only.
+        //
+        // Source: Security.GetLastData() returns Cache.GetData(), the last
+        // BaseData received for the security (null if none) -- a plain field
+        // read, confirmed in the LEAN source at the commit pinned in
+        // setup/06_lean_build.sh (Common/Securities/Security.cs and
+        // Common/Securities/SecurityCache.cs).
+        //
+        // STALE rule: the last data point's session date (BaseData.Time.Date,
+        // the bar START, so a daily bar maps to its own trading day whether
+        // its EndTime is 16:00 the same day or midnight the next day) is
+        // earlier than the previous trading day on the security's exchange
+        // calendar (Exchange.Hours.GetPreviousTradingDay, same LEAN source).
+        // At 10:00 ET on a Monday, Friday's bar is current; Thursday's is STALE.
+        //
+        // Never throws: any failure returns "lastData=unavailable" so this
+        // logging can never abort a rebalance or stop-loss check.
+        private string DescribeLastData(Symbol sym)
+        {
+            try
+            {
+                if (!Securities.ContainsKey(sym)) return "lastData=n/a";
+                var lastData = Securities[sym].GetLastData();
+                // Nothing received since the algorithm started.
+                if (lastData == null) return "lastData=none STALE";
+                var previousTradingDay = Securities[sym].Exchange.Hours.GetPreviousTradingDay(Time.Date);
+                var isStale = lastData.Time.Date < previousTradingDay.Date;
+                return $"lastData={lastData.EndTime:yyyy-MM-dd HH:mm}" + (isStale ? " STALE" : "");
+            }
+            catch (Exception)
+            {
+                return "lastData=unavailable";
             }
         }
 
@@ -788,7 +1034,22 @@ namespace PiAiTrader.Strategies
                 if (entryPrice <= 0m) continue;
 
                 var currentPrice = Securities[sym].Price;
-                if (currentPrice <= 0m) continue;
+                if (currentPrice <= 0m)
+                {
+                    // Previously silent: a held position with no price
+                    // cannot be checked against its stop. Still skipped
+                    // (unchanged behavior), but now reported -- at most once
+                    // per symbol per trading day, because this method runs
+                    // on every OnData() slice.
+                    if (!_stopLossNoPriceWarnedOn.TryGetValue(sym, out var warnedOn) || warnedOn != Time.Date)
+                    {
+                        _stopLossNoPriceWarnedOn[sym] = Time.Date;
+                        Error($"[StopLoss] SKIP {sym.Value} {SkipNoPrice} — held qty={holding.Quantity}, " +
+                              $"entry=${entryPrice:F2}, price=${currentPrice:F2} {DescribeLastData(sym)}; " +
+                              $"stop-loss not evaluated (logged at most once per symbol per trading day)");
+                    }
+                    continue;
+                }
 
                 // Stop-loss threshold price: entry × (1 − StopLossThreshold)
                 var stopPrice = entryPrice * (1m - StopLossThreshold);
@@ -854,6 +1115,16 @@ namespace PiAiTrader.Strategies
                     var targetQty2 = (long)(1.0m * Portfolio.TotalPortfolioValue / defPrice2);
                     var delta2     = targetQty2 - (long)Portfolio[defSym2].Quantity;
                     if (delta2 != 0) MarketOrder(defSym2, (decimal)delta2);
+                }
+                else
+                {
+                    // Previously silent: AGG had no usable price, so no AGG
+                    // order was sized. The liquidations above still went out,
+                    // so the halt leaves the account in cash, not AGG. This
+                    // runs once per halt (it sets _haltActive), so no rate limit.
+                    Error($"[DrawdownHalt] SKIP {DefensiveTicker} {SkipNoPrice} — price=${defPrice2:F2} " +
+                          $"{DescribeLastData(defSym2)}; no {DefensiveTicker} order submitted, " +
+                          "liquidation proceeds will remain in cash");
                 }
                 _entryPrices.Clear();
 
