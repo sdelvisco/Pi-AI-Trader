@@ -77,6 +77,39 @@ def create_app() -> Flask:
         )
     )
 
+    # Path to the shared trading-universe file. Written by the Settings
+    # page (POST /api/universe); read by DualMomentumV2 (once, in
+    # Initialize()) and by HeadlineNewsPipeline (every poll cycle), both via
+    # PiAiTrader.Intelligence.UniverseConfigReader. Writing it triggers
+    # services/universe-apply.path, which restarts lean-trader.
+    app.config["UNIVERSE_CONFIG_PATH"] = Path(
+        os.environ.get(
+            "UNIVERSE_CONFIG_PATH",
+            "/var/lib/tradingpi/headline-news-pipeline/universe.json",
+        )
+    )
+
+    # Repo seed copy of the universe (the one canonical seed; `make deploy`
+    # installs it when universe.json does not exist yet). The portal shows
+    # it when universe.json is missing or invalid, instead of keeping a
+    # third hardcoded copy of the list in Python.
+    app.config["UNIVERSE_SEED_PATH"] = app.config["PROJECT_ROOT"] / "config" / "universe.default.json"
+
+    # Strategy source the rebalance-window guard reads RebalanceHourEt /
+    # RebalanceMinuteEt from, so the schedule is never hardcoded here.
+    app.config["STRATEGY_SOURCE_PATH"] = app.config["PROJECT_ROOT"] / "strategies" / "csharp" / "DualMomentumV2.cs"
+
+    # Manual-rebalance trigger file polled by DualMomentumV2 every minute
+    # (same literal path as in DualMomentumV2.Initialize()). A pending
+    # trigger blocks universe saves.
+    app.config["FORCE_REBALANCE_TRIGGER_PATH"] = Path("/tmp/force_rebalance")
+
+    # Minimum seconds between universe saves. lean-trader.service has
+    # StartLimitBurst=3 within StartLimitIntervalSec=600; every save is one
+    # restart, so one save per 10 minutes keeps saves (plus a deploy's own
+    # restart) from tripping systemd's start limit.
+    app.config["UNIVERSE_APPLY_COOLDOWN_SECONDS"] = 600
+
     # -----------------------------------------------------------------------
     # Register blueprints
     # -----------------------------------------------------------------------

@@ -1,0 +1,43 @@
+# =============================================================================
+# universe-apply.path — restart lean-trader when the trading universe changes
+# =============================================================================
+# Watches the shared universe file that the web portal's Settings page writes
+# (POST /api/universe in web/routes/api.py). When the file changes, systemd
+# starts universe-apply.service, which restarts lean-trader so
+# DualMomentumV2.Initialize() re-reads the universe and subscribes the new
+# tickers.
+#
+# Why a .path unit and not sudo from Flask: lean-web.service has
+# NoNewPrivileges=true, so `sudo` inside the Flask process fails with
+# "The 'no new privileges' flag is set" (confirmed on the Pi 2026-11-24).
+# NoNewPrivileges stays ON for lean-web; the privileged restart happens here,
+# in a root-owned unit that lean-web can only trigger by writing one file.
+#
+# Why PathChanged (not PathModified): the portal writes atomically (temp file
+# + rename into place). PathChanged fired on both an atomic create and an
+# atomic replace (os.replace) in a test on the Pi on 2026-11-24. It does not
+# fire for the ".tmp" file, which has a different name.
+#
+# Installation (see README "Trading universe"):
+#   sudo cp services/universe-apply.path services/universe-apply.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now universe-apply.path
+# Only the .path unit is enabled; the .service is started by it.
+#
+# Same quirk as the other units: the repo copy is NOT what systemd reads.
+# Re-copy and daemon-reload after any change here.
+# =============================================================================
+
+[Unit]
+Description=Pi-AI-Trader: watch trading universe file and apply changes
+Documentation=https://github.com/sdelvisco/Pi-AI-Trader
+
+[Path]
+# Fires when the file is written and closed, or renamed into place.
+PathChanged=/var/lib/tradingpi/headline-news-pipeline/universe.json
+# The unit to start when the path changes (explicit, although it matches
+# this unit's name).
+Unit=universe-apply.service
+
+[Install]
+WantedBy=multi-user.target

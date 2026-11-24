@@ -259,14 +259,36 @@ namespace PiAiTrader.Strategies
         /// location exists in the codebase to prefer instead).</summary>
         private const string AggregatorConfigFilePath = "/var/lib/tradingpi/headline-news-pipeline/aggregator-config.json";
 
+        /// <summary>Path to the shared trading-universe file, written by the
+        /// web portal's Settings page (web/routes/api.py, POST /api/universe)
+        /// and read ONCE here, in Initialize(), through UniverseConfigReader.
+        /// Unlike aggregator-config.json it is NOT re-read per rebalance:
+        /// adding a ticker needs AddEquity(), which only happens in
+        /// Initialize(), so a universe change is applied by restarting
+        /// lean-trader (services/universe-apply.path watches this file and
+        /// restarts lean-trader when it changes). Same directory as
+        /// aggregator-config.json; same value as
+        /// UniverseConfigReader.DefaultFilePath.</summary>
+        private const string UniverseConfigFilePath = "/var/lib/tradingpi/headline-news-pipeline/universe.json";
+
         // =====================================================================
         // ██  UNIVERSE DEFINITION  ────────────────────────────────────────────
-        // ~50 assets spanning equity ETFs, sectors, international, fixed-income,
-        // individual large-caps, AI/tech names, commodities, crypto proxies, and
-        // safe-haven instruments.
+        // The LIVE universe comes from universe.json (UniverseConfigFilePath),
+        // which the web portal's Settings page edits. The array below is the
+        // BUILT-IN FALLBACK ONLY: Initialize() uses it, and logs that it did,
+        // when universe.json is missing, empty, malformed, over the size
+        // limit, contains an invalid or duplicate ticker, or lacks AGG or SPY
+        // (see UniverseConfigReader for the exact rules).
+        //
+        // It is also the list config/universe.default.json was seeded from
+        // (verbatim, same order) on 2026-11-24. Editing it here does NOT
+        // change the universe on a Pi that already has universe.json -- use
+        // the portal instead. 44 assets spanning equity ETFs, sectors,
+        // international, fixed-income, individual large-caps, AI/tech names,
+        // commodities, crypto proxies, and safe-haven instruments.
         // =====================================================================
 
-        private static readonly string[] UniverseTickers = new[]
+        private static readonly string[] BuiltInUniverseTickers = new[]
         {
             // ── Broad-market equity ETFs ──────────────────────────────────────
             "SPY",   // S&P 500 (SPDR)
@@ -340,6 +362,16 @@ namespace PiAiTrader.Strategies
         /// Maps each ticker string to its LEAN Symbol object after AddEquity().
         /// </summary>
         private readonly Dictionary<string, Symbol> _symbols = new Dictionary<string, Symbol>();
+
+        /// <summary>
+        /// The trading universe actually in use for this run, set ONCE in
+        /// Initialize() from universe.json (or BuiltInUniverseTickers as the
+        /// fallback). The AddEquity loop, the momentum ranking loop and the
+        /// lot-size check all iterate this one field, so they can never
+        /// disagree about which tickers are in the universe. Defaults to the
+        /// built-in list only so it is never null before Initialize() runs.
+        /// </summary>
+        private IReadOnlyList<string> _universeTickers = BuiltInUniverseTickers;
 
         /// <summary>
         /// Tracks the entry (average fill) price for each currently-held symbol.
@@ -528,10 +560,38 @@ namespace PiAiTrader.Strategies
             RegisterFractionalLotSize();
 
             // ------------------------------------------------------------------
+            // Trading universe: read universe.json ONCE, here. The reader never
+            // throws; on any problem it returns BuiltInUniverseTickers and the
+            // reason, which is logged below so the journal always says which
+            // source this run is using. AGG (DefensiveTicker) and SPY
+            // (AbsMomReferenceTicker) are passed as required tickers: a file
+            // without either one is rejected, because the absolute-momentum
+            // filter, the defensive branch and the rebalance schedule
+            // (DateRules.MonthStart on SPY) all look them up in _symbols.
+            // ------------------------------------------------------------------
+            var universeReader = new UniverseConfigReader(
+                UniverseConfigFilePath,
+                BuiltInUniverseTickers,
+                new[] { DefensiveTicker, AbsMomReferenceTicker });
+            var universeResult = universeReader.Read();
+            _universeTickers = universeResult.Tickers;
+            Log($"Universe source: {universeResult.SourceLabel}, size {_universeTickers.Count}");
+            if (universeResult.Source == UniverseConfigSource.HardcodedFallback)
+            {
+                // Error() rather than Log() so a fallback stands out in the
+                // journal: the owner's portal edits are NOT in effect.
+                Error($"[Universe] Using the built-in hardcoded universe because {universeResult.FallbackReason}");
+            }
+            else
+            {
+                Log($"[Universe] Read from {UniverseConfigFilePath}");
+            }
+
+            // ------------------------------------------------------------------
             // Subscribe to daily equity bars for every universe ticker.
             // Daily resolution is sufficient for a monthly-rebalance strategy.
             // ------------------------------------------------------------------
-            foreach (var ticker in UniverseTickers)
+            foreach (var ticker in _universeTickers)
             {
                 // AddEquity returns an EquitySubscriptionDataConfig; we only need
                 // the resulting Symbol for later order/history calls.
@@ -544,7 +604,7 @@ namespace PiAiTrader.Strategies
             VerifyEffectiveLotSize();
 
             Log("=== DualMomentumV2 Initialized ===");
-            Log($"Universe size     : {UniverseTickers.Length} symbols");
+            Log($"Universe size     : {_universeTickers.Count} symbols ({universeResult.SourceLabel})");
             Log($"Top positions     : {TopPositions} @ {PositionWeight:P0} each");
             Log($"Relative lookback : {RelativeMomentumMonths} months");
             Log($"Absolute lookback : {AbsoluteMomentumMonths} months");
@@ -802,7 +862,9 @@ namespace PiAiTrader.Strategies
 
             var momentumScores = new Dictionary<string, decimal>();
 
-            foreach (var ticker in UniverseTickers)
+            // Same _universeTickers list the AddEquity loop in Initialize()
+            // subscribed, so every ranked ticker has a Symbol in _symbols.
+            foreach (var ticker in _universeTickers)
             {
                 var ret = GetMomentumReturn(ticker, RelativeMomentumMonths);
                 if (ret.HasValue)
@@ -1487,7 +1549,7 @@ namespace PiAiTrader.Strategies
             var spyLot = Securities[_symbols[AbsMomReferenceTicker]].SymbolProperties.LotSize;
             var largestLot = configuredLot;
             var mismatched = new List<string>();
-            foreach (var ticker in UniverseTickers)
+            foreach (var ticker in _universeTickers)
             {
                 var lot = Securities[_symbols[ticker]].SymbolProperties.LotSize;
                 if (lot != configuredLot) mismatched.Add($"{ticker}={lot}");
@@ -1498,7 +1560,7 @@ namespace PiAiTrader.Strategies
             if (mismatched.Count == 0)
             {
                 Log($"[LotSize] Effective lot size check OK: {AbsMomReferenceTicker} lot size = {spyLot} " +
-                    $"(expected {configuredLot}); all {UniverseTickers.Length} universe symbols match. " +
+                    $"(expected {configuredLot}); all {_universeTickers.Count} universe symbols match. " +
                     $"Sizing lot size = {_sizingLotSize}");
             }
             else

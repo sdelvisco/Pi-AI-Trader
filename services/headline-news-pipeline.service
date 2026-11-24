@@ -15,6 +15,11 @@
 # isolated from the process placing real paper trades is the whole point of
 # running it as a separate process instead of in-process with lean-trader.
 #
+# One shared INPUT (2026-11-24): the trading universe is read at the start of
+# every poll cycle from /var/lib/tradingpi/headline-news-pipeline/universe.json
+# (written by the web portal, also read by DualMomentumV2). A missing/invalid
+# file falls back to TickerUniverse's built-in list; nothing is written back.
+#
 # Installation:
 #   sudo cp services/headline-news-pipeline.service /etc/systemd/system/
 #   sudo systemctl daemon-reload

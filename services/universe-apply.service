@@ -1,0 +1,37 @@
+# =============================================================================
+# universe-apply.service — apply a trading-universe change (oneshot, root)
+# =============================================================================
+# Started ONLY by universe-apply.path when
+# /var/lib/tradingpi/headline-news-pipeline/universe.json changes. Do not
+# enable this unit; enable the .path unit instead.
+#
+# What it does: `systemctl try-restart lean-trader`. try-restart (not
+# restart) only restarts lean-trader if it is already running, so saving the
+# universe while lean-trader is deliberately stopped does NOT start it; the
+# new universe is then picked up whenever lean-trader is next started.
+#
+# Runs as root (no User=), which is what allows the restart without any sudo
+# rule. It runs one fixed command and reads no input, so the only thing
+# lean-web can influence by writing the watched file is WHEN lean-trader
+# restarts, not what runs.
+#
+# Restart frequency: lean-trader.service has StartLimitBurst=3 within
+# StartLimitIntervalSec=600, and each restart counts. The portal therefore
+# refuses a save less than 10 minutes after the previous one
+# (UNIVERSE_APPLY_COOLDOWN_SECONDS in web/app.py).
+#
+# Check runs with:
+#   journalctl -u universe-apply.service -n 20 --no-pager
+# =============================================================================
+
+[Unit]
+Description=Pi-AI-Trader: restart lean-trader to apply a trading universe change
+Documentation=https://github.com/sdelvisco/Pi-AI-Trader
+
+[Service]
+Type=oneshot
+# systemctl talks to systemd over D-Bus; no new privileges are needed.
+NoNewPrivileges=true
+ExecStart=/bin/systemctl try-restart lean-trader.service
+# Log line in the journal so each apply is easy to find.
+ExecStartPost=/usr/bin/logger -t universe-apply "lean-trader try-restart requested after universe.json changed"

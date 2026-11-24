@@ -89,6 +89,13 @@ CPUQuota=50%
 # service on a dedicated trading Pi; the strict namespace sandbox causes
 # exit code 226 (mount namespace failure) if expected ReadWritePaths don't
 # exist at start time (e.g. lean/Results). NoNewPrivileges is sufficient.
+#
+# Consequence (confirmed on the Pi 2026-11-24): sudo cannot run inside this
+# process, so anything here that shells out to `sudo systemctl ...` fails
+# (including POST /api/control/stop -- known, not fixed). Keep this ON.
+# Trading-universe changes are applied without sudo instead: the portal writes
+# universe.json and the root-owned universe-apply.path/.service units restart
+# lean-trader (see services/universe-apply.path).
 NoNewPrivileges=true
 
 # -------------------------------------------------------------------------

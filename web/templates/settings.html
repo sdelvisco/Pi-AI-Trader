@@ -54,9 +54,108 @@
         </div>
     </div>
 </div>
+
+<h5 class="mt-4 mb-3"><i class="bi bi-list-check"></i> Trading Universe</h5>
+<div class="card bg-black border-secondary">
+    <div class="card-body">
+        <p class="text-muted-light">
+            The tickers DualMomentumV2 subscribes to and ranks each month, also
+            used by the headline-news pipeline. Edits are staged here and only
+            take effect when you press <strong>Save &amp; apply</strong>, which
+            writes the list once and <strong>restarts lean-trader</strong>.
+            AGG (defensive asset) and SPY (absolute-momentum reference) are
+            required and cannot be removed. A removed ticker that is currently
+            held is sold at the next scheduled rebalance, not immediately.
+        </p>
+
+        <!-- Source / status line: file vs default, count, dirty indicator. -->
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+            <span id="universe-source" class="badge bg-secondary">loading…</span>
+            <span id="universe-count" class="small text-muted-light"></span>
+            <span id="universe-dirty" class="badge bg-warning text-dark d-none">Unsaved changes</span>
+        </div>
+        <div id="universe-fallback" class="alert alert-warning py-1 small d-none"></div>
+
+        <!-- Add a ticker: validated against Alpaca before it joins the table. -->
+        <form id="universe-add-form" class="row g-2 align-items-center mb-2" autocomplete="off">
+            <div class="col-auto">
+                <input id="universe-add-input" type="text" maxlength="8"
+                       class="form-control form-control-sm bg-dark text-light border-secondary text-uppercase"
+                       placeholder="Ticker, e.g. AMD" aria-label="Ticker to add">
+            </div>
+            <div class="col-auto">
+                <button id="universe-add-button" type="submit" class="btn btn-sm btn-outline-info">
+                    <i class="bi bi-search"></i> Validate &amp; add
+                </button>
+            </div>
+            <div class="col-12 col-md">
+                <span id="universe-add-status" class="small text-muted-light"></span>
+            </div>
+        </form>
+        <!-- Per-check results for the last validated candidate. -->
+        <ul id="universe-add-checks" class="list-unstyled small mb-2"></ul>
+
+        <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
+            <table class="table table-dark table-sm mb-2">
+                <thead>
+                    <tr><th>#</th><th>Ticker</th><th>Status</th><th class="text-end">Action</th></tr>
+                </thead>
+                <tbody id="universe-table-body"></tbody>
+            </table>
+        </div>
+
+        <!-- Save-level errors (per ticker where possible). -->
+        <div id="universe-save-errors" class="alert alert-danger py-2 small d-none"></div>
+        <div id="universe-save-status" class="small mb-2"></div>
+
+        <div class="d-flex gap-2">
+            <button id="universe-save-button" type="button" class="btn btn-sm btn-warning" disabled>
+                <i class="bi bi-arrow-repeat"></i> Save &amp; apply
+            </button>
+            <button id="universe-revert-button" type="button" class="btn btn-sm btn-outline-secondary" disabled>
+                Discard changes
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Confirmation dialog for Save & apply. -->
+<div class="modal fade" id="universe-confirm-modal" tabindex="-1" aria-labelledby="universe-confirm-title" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content bg-dark text-light border-secondary">
+            <div class="modal-header border-secondary">
+                <h6 class="modal-title" id="universe-confirm-title">Save universe and restart lean-trader?</h6>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Cancel"></button>
+            </div>
+            <div class="modal-body small">
+                <p id="universe-confirm-summary"></p>
+                <p><strong>This restarts lean-trader</strong> (if it is running) so the new
+                    universe is subscribed. The restart takes about a minute.</p>
+                <div class="alert alert-warning py-2 mb-2">
+                    <strong>Known gap:</strong> a restart clears the strategy's in-memory
+                    state. Until new entries are bought:
+                    <ul class="mb-0">
+                        <li>stop-loss entry prices are empty, so the 15% per-position
+                            stop-loss does <em>not</em> protect current holdings;</li>
+                        <li>the drawdown peak resets and any active drawdown halt is cleared.</li>
+                    </ul>
+                </div>
+                <p class="mb-0">Removed tickers that are held are sold at the next scheduled
+                    rebalance, not now.</p>
+            </div>
+            <div class="modal-footer border-secondary">
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" id="universe-confirm-button" class="btn btn-sm btn-warning">
+                    Save &amp; restart lean-trader
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='js/universe.js') }}"></script>
 <script>
 fetch("/api/status")
     .then(r => r.json())

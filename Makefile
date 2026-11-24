@@ -16,6 +16,11 @@
 #       pi-admin ALL=(ALL) NOPASSWD: /usr/bin/python3 /home/pi-admin/Pi-AI-Trader/scripts/render_lean_config.py *
 #       pi-admin ALL=(ALL) NOPASSWD: /bin/systemctl restart lean-trader
 #       pi-admin ALL=(ALL) NOPASSWD: /bin/systemctl start lean-trader
+#       pi-admin ALL=(ALL) NOPASSWD: /bin/systemctl stop universe-apply.path
+#       pi-admin ALL=(ALL) NOPASSWD: /bin/systemctl start universe-apply.path
+#   - The two universe-apply.path rules are used only by universe-seed (below)
+#     in the rare case universe.json is missing while the .path watcher is
+#     running; without them sudo simply asks for a password at that step.
 #   - render_lean_config.py needs sudo (not just the config-copy step it
 #     replaces) because it must read /etc/tradingpi/alpaca.env, which is
 #     chmod 600 root:root, and write config.json into a directory owned
@@ -52,8 +57,17 @@ SERVICE      := lean-trader
 # config template, since neither LEAN nor `sudo` (which doesn't inherit the
 # invoking shell's environment) resolve them on their own.
 CREDENTIALS_ENV := /etc/tradingpi/alpaca.env
+# Shared trading-universe file (read by DualMomentumV2 and
+# HeadlineNewsPipeline, written by the web portal) and the one canonical
+# seed copy in the repo. universe-seed installs the seed ONLY when the file
+# does not exist yet; it never overwrites portal edits.
+UNIVERSE_FILE      := /var/lib/tradingpi/headline-news-pipeline/universe.json
+UNIVERSE_SEED      := config/universe.default.json
+# systemd .path unit that restarts lean-trader whenever UNIVERSE_FILE changes
+# (services/universe-apply.path).
+UNIVERSE_PATH_UNIT := universe-apply.path
 
-.PHONY: all build deploy verify force-rebalance
+.PHONY: all build deploy verify force-rebalance universe-seed
 
 # -----------------------------------------------------------------------------
 # all: full pipeline — build → deploy → verify
@@ -119,9 +133,55 @@ deploy:
 		'sys.exit(len(errs))' \
 		| python3
 	@echo "Config OK"
+	@# Seed universe.json BEFORE the restart below, so the restarted
+	@# DualMomentumV2 reads it and this deploy restarts lean-trader only once.
+	@$(MAKE) --no-print-directory universe-seed
 	@echo "==> Restarting $(SERVICE)..."
 	sudo systemctl restart $(SERVICE)
 	@echo "Deploy complete. Run 'make verify' to confirm initialization."
+
+# -----------------------------------------------------------------------------
+# universe-seed: install config/universe.default.json as UNIVERSE_FILE, only if
+# UNIVERSE_FILE does not exist yet (never overwrites portal edits).
+#
+# Avoiding a redundant restart: universe-apply.path uses PathChanged, which
+# also fires when the file is first CREATED. If the watcher is running, the
+# seed write would restart lean-trader on top of the restart `make deploy`
+# does right after this. So when the watcher is active, it is stopped for the
+# write and started again afterwards. A PathChanged watcher started while the
+# file already exists does not fire (it only reacts to changes after it
+# starts) -- confirm on the Pi with `journalctl -u universe-apply.service`.
+#
+# The write itself is atomic (temp file, then rename in the same directory),
+# the same way the portal writes. The directory is created by the
+# HeadlineNewsPipeline install steps (owned by pi-admin), so no sudo is
+# needed to write the file.
+# -----------------------------------------------------------------------------
+universe-seed:
+	@if [ -e "$(UNIVERSE_FILE)" ]; then \
+		echo "==> $(UNIVERSE_FILE) exists; leaving it unchanged (portal-managed)."; \
+	else \
+		if [ ! -d "$$(dirname $(UNIVERSE_FILE))" ]; then \
+			echo "ERROR: $$(dirname $(UNIVERSE_FILE)) does not exist. Create it first:"; \
+			echo "       sudo mkdir -p $$(dirname $(UNIVERSE_FILE)) && sudo chown pi-admin:pi-admin $$(dirname $(UNIVERSE_FILE))"; \
+			exit 1; \
+		fi; \
+		WATCHING=0; \
+		if systemctl is-active --quiet $(UNIVERSE_PATH_UNIT); then \
+			WATCHING=1; \
+			echo "==> Pausing $(UNIVERSE_PATH_UNIT) so seeding does not trigger an extra lean-trader restart..."; \
+			sudo systemctl stop $(UNIVERSE_PATH_UNIT); \
+		fi; \
+		echo "==> Seeding $(UNIVERSE_FILE) from $(UNIVERSE_SEED)..."; \
+		RC=0; \
+		{ install -m 0644 "$(UNIVERSE_SEED)" "$(UNIVERSE_FILE).tmp" && mv "$(UNIVERSE_FILE).tmp" "$(UNIVERSE_FILE)"; } || RC=$$?; \
+		if [ $$WATCHING = 1 ]; then \
+			echo "==> Resuming $(UNIVERSE_PATH_UNIT)..."; \
+			sudo systemctl start $(UNIVERSE_PATH_UNIT); \
+		fi; \
+		if [ $$RC != 0 ]; then echo "ERROR: seeding $(UNIVERSE_FILE) failed (exit $$RC)."; exit $$RC; fi; \
+		echo "Seeded $(UNIVERSE_FILE)."; \
+	fi
 
 # -----------------------------------------------------------------------------
 # verify: poll journal for "DualMomentumV2 Initialized" (up to 60s)

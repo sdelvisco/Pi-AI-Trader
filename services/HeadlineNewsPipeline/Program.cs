@@ -34,6 +34,13 @@ namespace PiAiTrader.HeadlineNewsPipeline
         private const string StateFileName = "state.json";
         private const string SignalsFileName = "signals.jsonl";
 
+        // Shared trading-universe file, written by the web portal and also
+        // read by DualMomentumV2. Resolved under the same state dir as the
+        // files above so HEADLINE_PIPELINE_STATE_DIR also relocates it; with
+        // the default state dir this is exactly
+        // UniverseConfigReader.DefaultFilePath.
+        private const string UniverseFileName = "universe.json";
+
         public static async Task Main(string[] args)
         {
             var stateDir = Environment.GetEnvironmentVariable(StateDirEnvVar);
@@ -51,7 +58,11 @@ namespace PiAiTrader.HeadlineNewsPipeline
             using (var llmClient = new AzureLlmClient())
             {
                 IIntelligenceModule intelligenceModule = new LlmSentimentModule(llmClient);
-                var runner = new PollCycleRunner(newsSource, intelligenceModule, stateStore, signalWriter, pacer);
+                // File-backed universe: re-read at the start of every poll
+                // cycle (PollCycleRunner.RunOnceAsync -> TickerUniverse.Refresh).
+                var universe = new TickerUniverse(Path.Combine(stateDir, UniverseFileName));
+                var runner = new PollCycleRunner(
+                    newsSource, intelligenceModule, stateStore, signalWriter, pacer, universe: universe);
 
                 using (var cancellationSource = new CancellationTokenSource())
                 {

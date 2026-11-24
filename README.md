@@ -39,18 +39,22 @@ Pi-AI-Trader/
 │   ├── lean_config.template.json   # LEAN Engine config template (${VAR} credential placeholders)
 │   ├── alpaca_credentials.template # Alpaca API key template → /etc/tradingpi/alpaca.env
 │   ├── azure_credentials.template  # Azure AI Foundry LLM template → /etc/tradingpi/azure.env
-│   └── notifications.template      # Email/SMS notification settings template
+│   ├── notifications.template      # Email/SMS notification settings template
+│   └── universe.default.json       # Seed trading universe (installed once by `make deploy`)
 │
 ├── services/                       # systemd unit files and the headline news pipeline
 │   ├── lean-trader.service         # LEAN Engine live trading service
 │   ├── lean-web.service            # Flask web interface service
 │   ├── headline-news-pipeline.service  # Headline news pipeline service (Phase 2 AI layer)
+│   ├── universe-apply.path         # Watches universe.json; starts universe-apply.service on change
+│   ├── universe-apply.service      # Oneshot (root): `systemctl try-restart lean-trader`
 │   ├── HeadlineNewsPipeline/       # Standalone headline-news pipeline (Phase 2 AI layer, step 2)
 │   └── HeadlineNewsPipeline.Tests/ # xUnit tests for the above
 │
 ├── web/                            # Flask web dashboard
 │   ├── __init__.py
 │   ├── app.py                      # Application factory and entry point (Flask-SocketIO server)
+│   ├── universe.py                 # Trading-universe validation, Alpaca checks, rebalance guard
 │   ├── routes/
 │   │   ├── __init__.py
 │   │   ├── dashboard.py            # HTML page routes (/, /logs, /performance, /settings)
@@ -64,7 +68,10 @@ Pi-AI-Trader/
 │   │   └── settings.html
 │   └── static/
 │       ├── css/dashboard.css
-│       └── js/dashboard.js
+│       ├── js/dashboard.js
+│       └── js/universe.js          # Settings page trading-universe editor
+│
+├── tests/web/                      # Python unittest tests for the web layer (stdlib only)
 │
 ├── strategies/                     # Trading algorithms
 │   ├── csharp/
@@ -252,20 +259,21 @@ Run these targets from the repo root on the Pi (`~/Pi-AI-Trader`).
 | Target | What it does |
 |---|---|
 | `make build` | Runs `dotnet build strategies/csharp/DualMomentumV2.csproj -c Release`, then fails if either `DualMomentumV2.dll` or `PiAiTrader.Intelligence.dll` is missing from `strategies/csharp/bin/Release/net10.0/`. |
-| `make deploy` | `sudo cp`s both DLLs to `/opt/lean-engine/Launcher/bin/Release/`, renders `config.json` via `scripts/render_lean_config.py`, checks the config (see [LEAN Configuration](#lean-configuration)), then `sudo systemctl restart lean-trader`. Aborts before the restart if any config check fails. |
+| `make deploy` | `sudo cp`s both DLLs to `/opt/lean-engine/Launcher/bin/Release/`, renders `config.json` via `scripts/render_lean_config.py`, checks the config (see [LEAN Configuration](#lean-configuration)), runs `make universe-seed`, then `sudo systemctl restart lean-trader`. Aborts before the restart if any config check fails. |
+| `make universe-seed` | Installs `config/universe.default.json` as `/var/lib/tradingpi/headline-news-pipeline/universe.json` **only if that file does not exist**; never overwrites portal edits. If `universe-apply.path` is running, it is stopped for the write and started again, so seeding does not cause a second lean-trader restart. See [Trading universe](#trading-universe-portal-editable). |
 | `make verify` | Polls `journalctl -u lean-trader` for up to 60 s for the line `DualMomentumV2 Initialized`. Exits 0 on success; on timeout prints the last 40 journal lines and exits 1. |
 | `make all` | `build` → `deploy` → `verify` in sequence. |
 | `make force-rebalance` | Creates `/tmp/force_rebalance` and tails `/opt/lean-engine/Launcher/bin/Release/log.txt`, filtered to rebalance/order/fill/error lines (Ctrl+C to stop). The strategy checks for this file every minute while the market is open, deletes it, and runs a full rebalance immediately. Outside market hours the file waits until the next open minute. |
 
 **Both DLLs must be deployed.** `DualMomentumV2.csproj` has a `ProjectReference` to `Intelligence/Intelligence.csproj`, so the build outputs `PiAiTrader.Intelligence.dll` next to `DualMomentumV2.dll`. If only the strategy DLL is copied, LEAN fails to load it.
 
-**Passwordless sudo is required** for `make deploy` (and therefore for `make all` and GitHub Actions). The exact `/etc/sudoers.d/pi-admin-lean` rules are listed in the header comment of the [`Makefile`](Makefile): the two DLL copies, `render_lean_config.py`, and `systemctl restart`/`start lean-trader`.
+**Passwordless sudo is required** for `make deploy` (and therefore for `make all` and GitHub Actions). The exact `/etc/sudoers.d/pi-admin-lean` rules are listed in the header comment of the [`Makefile`](Makefile): the two DLL copies, `render_lean_config.py`, `systemctl restart`/`start lean-trader`, and `systemctl stop`/`start universe-apply.path` (used only when seeding a missing universe file while the watcher runs).
 
 ### Automatic deployment (GitHub Actions)
 
 [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) runs on every push to `main`. It SSHes into the Pi as `pi-admin`, runs `git fetch origin main && git checkout main && git reset --hard origin/main` in `~/Pi-AI-Trader`, then runs `make all`. A final step reports whether `lean-trader` is active. It requires a `PI_SSH_KEY` repository secret whose public key is in `pi-admin`'s `~/.ssh/authorized_keys`, plus the sudoers rules above.
 
-The workflow only rebuilds and restarts `lean-trader`. It does **not** restart `lean-web` or rebuild/restart `headline-news-pipeline`; see below.
+The workflow only rebuilds and restarts `lean-trader` (and seeds `universe.json` if it is missing). It does **not** restart `lean-web`, rebuild/restart `headline-news-pipeline`, or install the `universe-apply` units; see below.
 
 ---
 
@@ -296,8 +304,9 @@ sudo chmod 600 /etc/tradingpi/azure.env
 sudo chown root:root /etc/tradingpi/azure.env
 
 # Persistent runtime state for the headline news pipeline (dedup high-water
-# mark, JSON-lines Signal output, and the Signal Aggregator mode file —
-# distinct from /etc/tradingpi's credential-only role)
+# mark, JSON-lines Signal output), the Signal Aggregator mode file and the
+# shared trading-universe file universe.json — distinct from /etc/tradingpi's
+# credential-only role
 sudo mkdir -p /var/lib/tradingpi/headline-news-pipeline
 sudo chown pi-admin:pi-admin /var/lib/tradingpi/headline-news-pipeline
 
@@ -311,9 +320,9 @@ Environment variables read by the code:
 
 | File | Variables | Used by |
 |---|---|---|
-| `/etc/tradingpi/alpaca.env` | `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY`, `ALPACA_PAPER_TRADING` (template also has `ALPACA_BASE_URL`, `ALPACA_DATA_URL`) | `render_lean_config.py`, `lean-trader`, `lean-web`, `headline-news-pipeline` |
+| `/etc/tradingpi/alpaca.env` | `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY`, `ALPACA_PAPER_TRADING`, `ALPACA_BASE_URL`, `ALPACA_DATA_URL`. `lean-web` uses all five for the trading-universe checks: `ALPACA_BASE_URL` (scheme+host only, no `/v2`) for assets/orders/calendar — if it is empty, the host is derived from `ALPACA_PAPER_TRADING` (`true`/`false`; anything else refuses) — and `ALPACA_DATA_URL` for prices. | `render_lean_config.py`, `lean-trader`, `lean-web`, `headline-news-pipeline` |
 | `/etc/tradingpi/azure.env` | `AZURE_LLM_ENDPOINT`, `AZURE_LLM_API_KEY`, `AZURE_LLM_DEPLOYMENT_NAME` | `headline-news-pipeline` |
-| `/etc/tradingpi/web.env` | `FLASK_SECRET_KEY`; optional overrides `LEAN_RESULTS_DIR` (default `/opt/lean-engine/Launcher/bin/Release`) and `AGGREGATOR_CONFIG_PATH` (default `/var/lib/tradingpi/headline-news-pipeline/aggregator-config.json`) | `lean-web` |
+| `/etc/tradingpi/web.env` | `FLASK_SECRET_KEY`; optional overrides `LEAN_RESULTS_DIR` (default `/opt/lean-engine/Launcher/bin/Release`) `AGGREGATOR_CONFIG_PATH` (default `/var/lib/tradingpi/headline-news-pipeline/aggregator-config.json`) and `UNIVERSE_CONFIG_PATH` (default `/var/lib/tradingpi/headline-news-pipeline/universe.json`; the C# readers always use the default path) | `lean-web` |
 | — | `HEADLINE_PIPELINE_STATE_DIR` (optional, default `/var/lib/tradingpi/headline-news-pipeline`) | `headline-news-pipeline` |
 
 ---
@@ -325,7 +334,9 @@ Environment variables read by the code:
 sudo cp services/lean-trader.service /etc/systemd/system/
 sudo cp services/lean-web.service    /etc/systemd/system/
 sudo cp services/headline-news-pipeline.service /etc/systemd/system/
+sudo cp services/universe-apply.path services/universe-apply.service /etc/systemd/system/
 sudo systemctl daemon-reload
+sudo systemctl enable --now universe-apply.path   # enable the .path unit only, not the .service
 ```
 
 The copies in `services/` are not what systemd reads. After changing a unit file in the repo, copy it to `/etc/systemd/system/` again and run `sudo systemctl daemon-reload`.
@@ -369,7 +380,8 @@ sudo journalctl -u lean-trader -f
 This is a standalone service, isolated by design from lean-trader/DualMomentumV2
 — see [`services/headline-news-pipeline.service`](services/headline-news-pipeline.service)
 for the full rationale. Every 4 hours it polls Alpaca's News API for headlines on
-DualMomentumV2's trading universe, scores each headline/ticker pair with the
+the trading universe (re-read from `universe.json` at the start of every cycle,
+see [Trading universe](#trading-universe-portal-editable)), scores each headline/ticker pair with the
 Azure-backed `LlmSentimentModule`, and appends the resulting signals to
 `/var/lib/tradingpi/headline-news-pipeline/signals.jsonl`. It never talks to
 lean-trader directly; `DualMomentumV2` reads that file at each rebalance (see
@@ -397,13 +409,34 @@ Values below are taken from [`strategies/csharp/DualMomentumV2.cs`](strategies/c
 - **Sizing**: fractional shares (rounded down to 0.0001), investing roughly 100% of the account minus a 1% cash reserve.
 - **Startup log**: after `=== DualMomentumV2 Initialized ===` (the line `make verify` looks for), the algorithm logs `Rebalance schedule: first trading day of month 10:00 ET, Day market orders`.
 - **Manual rebalance**: `make force-rebalance` (see [Deployment](#deployment-makefile)).
+- **Startup universe line**: `Universe source: file, size N` (or `hardcoded-fallback`, with an `[Universe]` error line giving the reason). See below.
+
+### Trading universe (portal-editable)
+
+The universe is the shared file `/var/lib/tradingpi/headline-news-pipeline/universe.json`, shaped `{"Tickers": ["SPY", ...]}`. It follows the same "small shared JSON file" pattern as `aggregator-config.json`, with one difference: it is applied by **restarting lean-trader**, because adding a ticker needs `AddEquity()`, which only runs in `Initialize()`.
+
+- **Edit it** on the dashboard's `/settings` page, in the Trading Universe card. Each added ticker is checked with Alpaca first: it must be an active, tradable US equity, it must be fractionable, and it must have a price on the free IEX feed. Removals are staged too. **Save & apply** writes the whole list once. AGG (defensive asset) and SPY (absolute-momentum reference) are locked. The limit is 100 tickers.
+- **What applies it**: `universe-apply.path` (`PathChanged`) sees the atomic rename and starts `universe-apply.service`, which runs `systemctl try-restart lean-trader` as root. `lean-web` never calls `sudo` (its `NoNewPrivileges=true` stays on). `try-restart` does nothing if lean-trader is stopped; the new list is then used at its next start.
+- **When a save is refused**:
+  - 409 if `/tmp/force_rebalance` is pending.
+  - 409 between 10 minutes before and 30 minutes after the scheduled rebalance on the first trading day of the month. The time is read from `RebalanceHourEt`/`RebalanceMinuteEt` in `DualMomentumV2.cs`, and the first trading day comes from Alpaca's calendar.
+  - 409 if Alpaca reports open orders.
+  - 503 if any of those checks cannot be completed.
+  - 429 within 10 minutes of the previous change, because lean-trader's `StartLimitBurst=3` per 10 minutes counts every restart.
+- **Removed tickers that are held** are not sold immediately. After the restart, LEAN re-adds them from the brokerage holdings, and the next scheduled rebalance sells them, because `LiquidateAllExcept` iterates portfolio holdings.
+- **Known gap (restart clears in-memory state)**: until new entries are bought, stop-loss entry prices are empty, so the stop-loss does not protect current holdings. The drawdown peak and any halt also reset. The confirmation dialog says so. See DEVIATIONS.md (2026-11-24).
+- **Readers**:
+  - `DualMomentumV2` reads the file once in `Initialize()` through `PiAiTrader.Intelligence.UniverseConfigReader`, and uses that one list for the `AddEquity` loop, the momentum ranking and the lot-size check.
+  - `HeadlineNewsPipeline` reads it at the start of every poll cycle through the same reader.
+  - If the file is missing, empty, malformed, over 100 tickers, has an invalid or duplicate ticker, or lacks AGG or SPY, both readers fall back to their built-in list and log `hardcoded-fallback` with the reason. The portal then shows the repo seed (`config/universe.default.json`) with a "built-in default" badge.
+- **Seeding**: `make deploy` runs `make universe-seed`, which installs the seed only when the file does not exist.
 
 ### Signal Aggregator (sentiment-adjusted sizing)
 
 The Signal Aggregator (Phase 2, Step 3) lives in `strategies/csharp/Intelligence/` (`SignalsFileReader`, `AggregatorConfigReader`, `SignalAggregator`, `PositionSizer`, `AggregationMode`, `AggregatedSignal`, `AggregatorConfig`). It is compiled into `PiAiTrader.Intelligence.dll` and called from `DualMomentumV2.ComputeSentimentAdjustedWeights()` during each rebalance:
 
 1. Only the **risk-on top-N branch** uses it. It never affects which tickers the momentum ranking selects, and is never used for the defensive 100% AGG path.
-2. `AggregatorConfigReader` reads the active mode fresh on every rebalance from `/var/lib/tradingpi/headline-news-pipeline/aggregator-config.json`. The modes are `WeightedVote`, `ConfidenceWeighted`, `ConsensusOnly` and `CapitalSplit`. If the file is missing or invalid, it defaults to `CapitalSplit`. The mode is set from the dashboard's `/settings` page (`POST /api/aggregator-mode`), so a change takes effect at the next rebalance without restarting `lean-trader`.
+2. `AggregatorConfigReader` reads the active mode fresh on every rebalance from `/var/lib/tradingpi/headline-news-pipeline/aggregator-config.json`. The modes are `WeightedVote`, `ConfidenceWeighted`, `ConsensusOnly` and `CapitalSplit`. If the file is missing or invalid, it defaults to `CapitalSplit`. The mode is set from the dashboard's `/settings` page (`POST /api/aggregator-mode`), so a change takes effect at the next rebalance without restarting `lean-trader`. (`universe.json` uses the same shared-file pattern, but is applied by a restart; see [Trading universe](#trading-universe-portal-editable).)
 3. For each selected ticker, `SignalsFileReader` reads the signals from the last **7 days** in `signals.jsonl`, and `SignalAggregator` combines them into one `AggregatedSignal`.
 4. `PositionSizer.ComputeAdjustedWeights()` adjusts each ticker's equal base weight by at most **±50%**, then renormalizes so the total allocation is unchanged. A ticker with no recent signals keeps exactly its base weight.
 5. Any exception falls back to exact equal weights and is logged as `[SignalAggregator] Failed to compute sentiment-adjusted weights`. Each successful rebalance logs `[SignalAggregator] Active mode: ...` and one line per ticker with base weight, adjusted weight, signal count, score and confidence.
@@ -423,6 +456,12 @@ dotnet test strategies/csharp/Intelligence.Tests/Intelligence.Tests.csproj --fil
 
 # Headline news pipeline — mocked HTTP only
 dotnet test services/HeadlineNewsPipeline.Tests/HeadlineNewsPipeline.Tests.csproj
+```
+
+The web layer has Python tests that use only the standard library's `unittest` and a fake Alpaca, so they make no network calls. Run them from the repo root with the project venv, which has Flask:
+
+```bash
+venv/bin/python -m unittest discover -s tests -t . -v
 ```
 
 ---

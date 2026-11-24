@@ -1521,4 +1521,148 @@ The following cosmetic issues were resolved by updates to `web/templates/dashboa
   `make build && make deploy && make verify`, and the startup journal should show the new
   `Rebalance schedule:` line.
 
-*Last updated: 2026-10-06*
+
+---
+
+## 2026-11-24: Portal-editable trading universe (shared `universe.json`)
+
+### Universe moved from two hardcoded arrays to one shared file
+- **Date changed:** 2026-11-24.
+- **Before:** the universe was hardcoded twice. `DualMomentumV2.UniverseTickers` and
+  `HeadlineNewsPipeline/TickerUniverse.Tickers` (44 tickers each, identical) had to be kept in
+  sync by hand. See "Known, accepted duplication: trading universe copied from
+  DualMomentumV2.cs" (2026-08-28) above.
+- **Change:**
+  - **One shared file**: `/var/lib/tradingpi/headline-news-pipeline/universe.json`, shaped
+    `{"Tickers": [...]}`. It is written by the web portal (`POST /api/universe`) with temp
+    file + rename, the same way `aggregator-config.json` is written.
+  - **Seed**: `config/universe.default.json` holds the 44 tickers, verbatim and in the same
+    order. `make deploy` → `make universe-seed` installs it only if the file does not exist.
+  - **One reader for both consumers**: `PiAiTrader.Intelligence.UniverseConfigReader`
+    (+ `UniverseConfig`, `UniverseReadResult`, `UniverseConfigSource`), in the same
+    fail-safe style as `AggregatorConfigReader`. It never throws. If the file is missing,
+    empty, malformed, empty-array, over 100 tickers, has an invalid or duplicate ticker
+    (compared after upper-casing), or lacks AGG or SPY, it returns the CALLER'S built-in list
+    with a reason. One bad entry rejects the whole file; there is no partial universe.
+  - **DualMomentumV2** reads the file once in `Initialize()` and logs
+    `Universe source: file|hardcoded-fallback, size N`. On a fallback it also logs an
+    `[Universe] ...` Error line with the reason. The `AddEquity` loop, the momentum ranking
+    loop and `VerifyEffectiveLotSize` all iterate the same `_universeTickers` field. The old
+    array was renamed `BuiltInUniverseTickers` and is the fallback only.
+  - **HeadlineNewsPipeline**: `TickerUniverse` is now an instance class. `Refresh()` re-reads
+    the file, and `TickerSet` is rebuilt from the current list.
+    `PollCycleRunner.RunOnceAsync()` calls `Refresh()` at the start of every poll cycle.
+    `Program.cs` points it at `<state dir>/universe.json`, which is the shared path with the
+    default state dir.
+- **Duplication status:** the hand-sync duplication is **retired**. Both processes read the
+  same file. Two built-in copies remain, `DualMomentumV2.BuiltInUniverseTickers` and
+  `TickerUniverse.BuiltInTickers`, plus the seed. They now matter only while the file is
+  unusable. `tests/web/test_universe_api.py` (`ConsistencyTests`) and
+  `UniversePerCycleTests.BuiltInTickers_MatchRepoSeedFile` fail if the three drift apart.
+  There is deliberately no Python copy: the portal falls back to the seed file.
+- **Validation rules are defined twice**: C# `UniverseConfigReader` and Python
+  `web/universe.py` (ticker regex `^[A-Z]{1,5}(\.[A-Z]{1,2})?$`, max 100, AGG+SPY required,
+  no duplicates). Each points at the other. If they disagree, the portal could save a file
+  the C# readers reject (they would fall back and log it).
+
+### How a change is applied: `.path` unit, not sudo from Flask (V1)
+- **Finding V1 (confirmed on the Pi by the owner, 2026-11-24):** the running lean-web has
+  `NoNewPrivs=1`, and `sudo` fails under it ("no new privileges flag is set"). pi-admin's
+  sudoers rules list only `systemctl restart lean-trader` and `start lean-trader`.
+- **Consequence (not fixed here):** `POST /api/control/stop` (`sudo systemctl stop
+  lean-trader`) **fails today** for both reasons: sudo is blocked and `stop` has no sudoers
+  rule. Out of scope for this change.
+- **Change:**
+  - `services/universe-apply.path` uses `PathChanged=` on `universe.json`. The owner's Pi test
+    showed it fires on an atomic create and on an atomic replace (`os.replace`).
+  - `services/universe-apply.service` is a root oneshot that runs
+    `systemctl try-restart lean-trader.service`. `try-restart` means a deliberately stopped
+    lean-trader is not started by a save.
+  - lean-web keeps `NoNewPrivileges=true`. One save is one write, which is one restart.
+- **Seeding without a second restart:** `PathChanged` also fires when the file is created.
+  `make universe-seed` therefore stops `universe-apply.path` if it is active, writes the
+  seed, and starts the watcher again. All of this happens before `make deploy`'s own
+  restart. That needs two new sudoers rules (`systemctl stop`/`start universe-apply.path`),
+  listed in the Makefile header. Without them, sudo asks for a password; in the GitHub
+  Actions deploy, that step would fail. This path only runs when the file is missing and the
+  watcher is running.
+- **Assumption to confirm on the Pi:** starting a `PathChanged` watcher while the file already
+  exists does not fire. This was read from systemd behaviour, not tested.
+- **Restart-rate guard:** lean-trader has `StartLimitBurst=3` per `StartLimitIntervalSec=600`,
+  and every restart counts. The portal refuses a save (HTTP 429) within 600 s of the file's
+  last change (`UNIVERSE_APPLY_COOLDOWN_SECONDS`).
+
+### Removed-but-held tickers are sold at the next rebalance (V3)
+- **Finding V3 (from source; not yet seen on the Pi):**
+  - `LiquidateAllExcept()` iterates `Portfolio.Values`, not `_symbols`/the universe list.
+  - At the pinned LEAN commit `c88955b9`, `BrokerageSetupHandler.LoadExistingHoldingsAndOrders`
+    runs after `Initialize()` and calls `GetOrAddUnrequestedSecurity()` for every brokerage
+    holding. That adds it at `UniverseSettings.Resolution`, which DualMomentumV2 never sets.
+    It then calls `SetMarketPrice` from `holding.MarketPrice`. The pinned Alpaca plugin
+    (`86f896e4`) `GetAccountHoldings()` fills that from Alpaca's `AssetCurrentPrice`.
+  - So a held ticker removed from the universe has a Security and a price after the restart,
+    and the next scheduled rebalance sells it. No immediate-liquidation code was added.
+  - The fractional lot size is a wildcard entry registered before this point, so it applies
+    to these securities too.
+- **Watch for on the first real removal:** `Adding unrequested security: X` at startup, then
+  `[Liquidate] Exiting X (not in new target set)` at the next rebalance.
+
+### Known gap that now matters more: a restart clears in-memory risk state
+- **Unchanged logic, now exercised by every universe save:**
+  - `_entryPrices` is only filled by buy fills, so after any restart `CheckStopLosses()` skips
+    every held position until it is bought again: no stop-loss protection.
+  - `_peakPortfolioValue` resets to `SeedCash`, and `_haltActive`/`_haltStartDate` reset, so
+    an active drawdown halt is dropped.
+- This was already true for `make deploy` and crashes. Restarts are now routine, so the
+  Save & apply confirmation dialog warns about it explicitly. The logic was not changed
+  (owner decision: out of scope).
+
+### Alpaca endpoints used by the portal (V2, V4)
+- **V2 (owner, on the Pi):** all five `ALPACA_*` variables are set in the running lean-web.
+- **Base URL handling (owner decision Q1):**
+  - `ALPACA_BASE_URL` is used if set. Only when it is empty is the host derived from
+    `ALPACA_PAPER_TRADING` (`true` → paper, `false` → live). The two hosts are named
+    constants in one place, `web/universe.py`.
+  - Any other value refuses validation. A base URL with a path, such as a trailing `/v2`, is
+    refused as malformed.
+  - Only scheme+host is logged, never keys.
+- **V4: verified against docs.alpaca.markets on 2026-11-24.** The authoring session's
+  network had to be widened to reach the docs site.
+  - `GET {base}/v2/assets/{symbol}`: `status` (`active`/`inactive`), `tradable`, `fractionable`
+    and `class` are required fields; an unknown symbol returns 404.
+  - `GET {data}/v2/stocks/{symbol}/snapshot?feed=iex`: `latestTrade`, `latestQuote`,
+    `minuteBar`, `dailyBar`, `prevDailyBar`. `feed` defaults to `iex` without the unlimited
+    plan, and the free Basic plan is IEX-only for real-time equities. The price check uses
+    `latestTrade.p`, then `dailyBar.c`, then `prevDailyBar.c`.
+  - `GET {base}/v2/orders?status=open`: open orders. A save is refused (409) if there are
+    any, and refused (503) if the call fails.
+  - `GET {base}/v2/calendar?start&end`: trading days, used to find the first trading day of
+    the month for the rebalance-window guard. The docs list this endpoint under "legacy"; a
+    `/v3/calendar/{market}` endpoint also exists. Auth uses the headers
+    `APCA-API-KEY-ID`/`APCA-API-SECRET-KEY`.
+- **Rebalance guard:** saves are refused (409) from 10 minutes before to 30 minutes after
+  `RebalanceHourEt:RebalanceMinuteEt` ET on the first trading day of the month. Both values
+  are parsed from `DualMomentumV2.cs` at request time. If parsing fails, the save is refused
+  (503). Saves are also refused while `/tmp/force_rebalance` exists.
+
+### Validation status
+- **Python:** 36 `unittest` tests in `tests/web/test_universe_api.py` (new; the repo had no
+  Python test pattern) pass in the authoring sandbox with Flask 3.1.3.
+- **UI:** the Settings page was driven end to end in headless Chromium against a fake Alpaca:
+  remove, failed add, passing add, confirmation dialog, save, and the cooldown refusal. The
+  CDN-hosted Bootstrap was served from its npm package because the CDN was blocked. If
+  Bootstrap's JS fails to load, the editor falls back to `window.confirm()` with the same
+  warnings.
+- **C#: compiled and tested in the sandbox, NOT against the Pi's build.** The sandbox
+  installed the .NET 10 SDK and used NuGet `QuantConnect.Logging`/`QuantConnect.*`
+  2.5.18257 and `Newtonsoft.Json` 13.0.2 in place of `/opt/lean-engine`:
+  - `Intelligence.Tests`: 89/89 passed, including 26 new `UniverseConfigReaderTests` cases.
+  - `HeadlineNewsPipeline.Tests`: 29/29 passed, including 6 new `UniversePerCycleTests`.
+  - `DualMomentumV2.cs` compiled against those packages.
+  - All of this must be re-run on the Pi against the pinned LEAN build (`c88955b9`).
+- **Deployment note:** `.github/workflows/deploy.yml` runs `make all` on every push to `main`,
+  so merging deploys the strategy change and seeds `universe.json`. It does not restart
+  lean-web, rebuild the pipeline, or install the `universe-apply` units; those are manual
+  (README, "Trading universe").
+
+*Last updated: 2026-11-24*
