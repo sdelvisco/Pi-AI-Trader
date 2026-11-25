@@ -27,6 +27,7 @@ Usage (production via systemd):
 
 import os
 import json
+import logging
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -41,6 +42,17 @@ from flask_socketio import SocketIO
 def create_app() -> Flask:
     """Create and configure the Flask application."""
     app = Flask(__name__)
+
+    # Let app.logger.info() lines reach the journal. Without this, Flask's
+    # app logger inherits the root logger's WARNING level (Flask only lowers
+    # it in debug mode), so INFO lines such as the trading-universe
+    # "Universe validation: Alpaca trading API <scheme+host>" and
+    # "Universe saved: ..." lines (web/universe.py, web/routes/api.py) were
+    # silently dropped -- found on the Pi 2026-11-25. Flask's default handler
+    # writes to stderr, which lean-web.service sends to the journal. Only
+    # app.logger is changed; other loggers (e.g. web.routes.logs) keep the
+    # root WARNING level.
+    app.logger.setLevel(logging.INFO)
 
     # -----------------------------------------------------------------------
     # Configuration

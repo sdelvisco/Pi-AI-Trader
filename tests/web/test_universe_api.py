@@ -22,6 +22,7 @@ built (web.app's module-level SocketIO setup is not imported).
 """
 
 import json
+import logging
 import os
 import re
 import tempfile
@@ -267,6 +268,18 @@ class ValidateTickerTests(UniverseApiTestBase):
             self.assertEqual(self.post("AMD").status_code, 200)
         self.assertIn("https://paper.example.test/v2/assets/AMD", self.alpaca.urls)
 
+    def test_validation_logs_scheme_and_host_but_never_keys(self):
+        # Owner requirement: log only the scheme+host used, never keys.
+        self.alpaca.add_good("AMD")
+        app = self.client.application
+        with self.assertLogs(app.logger, level="INFO") as captured:
+            self.assertEqual(self.post("AMD").status_code, 200)
+        text = "\n".join(captured.output)
+        self.assertIn("https://paper.example.test", text)
+        self.assertIn("https://data.example.test", text)
+        self.assertNotIn(ALPACA_ENV["ALPACA_KEY_ID"], text)
+        self.assertNotIn(ALPACA_ENV["ALPACA_SECRET_KEY"], text)
+
     def test_missing_keys_refuses(self):
         with mock.patch.dict(os.environ, {"ALPACA_KEY_ID": ""}):
             # The real header builder runs inside alpaca_get_json, which is
@@ -388,6 +401,19 @@ class SaveUniverseTests(UniverseApiTestBase):
         broken.write_text("// no schedule constants here", encoding="utf-8")
         self.client.application.config["STRATEGY_SOURCE_PATH"] = broken
         self.assertEqual(self.save(["SPY", "AGG"]).status_code, 503)
+
+
+class AppLoggingTests(unittest.TestCase):
+    """The real app factory must let INFO lines through (Pi finding 2026-11-25)."""
+
+    def test_create_app_logger_emits_info(self):
+        try:
+            # web.app imports flask_socketio (installed in the Pi's venv).
+            from web.app import create_app
+        except ImportError as exc:  # pragma: no cover - only without the venv
+            self.skipTest(f"web.app not importable here: {exc}")
+        app = create_app()
+        self.assertTrue(app.logger.isEnabledFor(logging.INFO))
 
 
 class HelperTests(unittest.TestCase):

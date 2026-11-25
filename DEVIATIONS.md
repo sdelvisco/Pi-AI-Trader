@@ -1665,4 +1665,30 @@ The following cosmetic issues were resolved by updates to `web/templates/dashboa
   lean-web, rebuild the pipeline, or install the `universe-apply` units; those are manual
   (README, "Trading universe").
 
-*Last updated: 2026-11-24*
+### Pi validation results (2026-11-24 evening, reported by the owner)
+- V1 and V2 re-confirmed (`NoNewPrivs: 1`; sudo refuses under the flag; all five
+  `ALPACA_*` set).
+- The `PathChanged` test unit fired on an atomic create and on an atomic replace.
+- Tests against the pinned LEAN build: `Intelligence.Tests` 89/89,
+  `HeadlineNewsPipeline.Tests` 29/29, Python `tests/web` 36/36.
+- `make build` passed with one pre-existing warning (CS0618 on `IsMarketOpen("SPY")`).
+- `make deploy` seeded `universe.json` and restarted lean-trader once. The log showed
+  `Universe source: file, size 44`.
+- Enabling `universe-apply.path` with the file already present did NOT fire, which
+  confirms the earlier assumption (`ActiveEnterTimestamp` unchanged, no
+  `universe-apply.service` entries).
+- The pipeline logged `TickerUniverse: universe source: file, size 44`.
+- `/api/universe/validate` for AMD passed all three checks against the real Alpaca API.
+  Saving without SPY returned 400.
+- The first AMD save was refused with 429: the cooldown counts from the seed write by
+  `make deploy`. That is intended, because the deploy's own restart also counts toward
+  `StartLimitBurst`. After 10 minutes the save applied, and lean-trader restarted with
+  `size 45`. The owner reports that removal also works.
+- **Defect found and fixed (2026-11-25):** the `Universe validation: Alpaca trading API
+  <scheme+host>` line never reached the journal. Flask's `app.logger` inherits the root
+  logger's WARNING level outside debug mode, so INFO lines were dropped; the
+  `Universe saved: ...` line was affected the same way. `create_app()` now sets
+  `app.logger` to INFO. Tests were added for the level and for the line containing
+  scheme+host but no key values.
+
+*Last updated: 2026-11-25*
