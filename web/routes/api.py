@@ -15,15 +15,23 @@ Endpoints:
   POST /api/control/stop     — emergency stop (graceful shutdown)
   GET  /api/aggregator-mode  — current Signal Aggregator active mode
   POST /api/aggregator-mode  — set the Signal Aggregator active mode
+  GET  /api/universe          — current trading universe (+ locked tickers, source)
+  POST /api/universe/validate — Alpaca checks for ONE candidate ticker
+  POST /api/universe          — validate + atomically write the whole universe
+                                (applied by universe-apply.path restarting lean-trader)
 """
 
 import os
 import json
+import time
+import threading
 import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, current_app, request, abort, send_file
+
+from .. import universe as uv
 
 api_bp = Blueprint("api", __name__)
 
@@ -696,3 +704,212 @@ def aggregator_mode_post():
         return jsonify({"status": "error", "message": f"Failed to write config: {exc}"}), 500
 
     return jsonify({"status": "ok", "active_mode": mode})
+
+
+# ---------------------------------------------------------------------------
+# Trading universe endpoints
+#
+# The universe is the shared file UNIVERSE_CONFIG_PATH
+# (/var/lib/tradingpi/headline-news-pipeline/universe.json), same pattern
+# as aggregator-config.json above. Validation rules, Alpaca calls and the
+# rebalance-window guard live in web/universe.py; these routes only wire
+# them to HTTP.
+#
+# Applying a change: lean-web does NOT restart lean-trader itself (its
+# NoNewPrivileges=true makes sudo fail -- see DEVIATIONS.md 2026-11-24).
+# Writing the file is the whole action: services/universe-apply.path
+# (PathChanged) notices the rename into place and starts
+# universe-apply.service, which runs `systemctl try-restart lean-trader`
+# as root. One save = one write = one restart.
+# ---------------------------------------------------------------------------
+
+# Serializes POST /api/universe so two browser tabs cannot interleave their
+# checks and writes (the dashboard runs Flask-SocketIO in threading mode).
+_universe_write_lock = threading.Lock()
+
+
+@api_bp.route("/universe", methods=["GET"])
+def universe_get():
+    """
+    Returns the universe the portal should display and edit:
+      tickers         -- current list, in order
+      locked          -- tickers that cannot be removed (AGG, SPY)
+      source          -- "file" (universe.json is valid and in use) or
+                         "default" (universe.json missing/invalid; the repo
+                         seed config/universe.default.json is shown, and
+                         both C# consumers are on their built-in lists)
+      fallback_reason -- why source is "default" (null otherwise)
+      max_size        -- largest accepted universe
+    """
+    try:
+        current = uv.effective_universe(
+            current_app.config["UNIVERSE_CONFIG_PATH"], current_app.config["UNIVERSE_SEED_PATH"]
+        )
+    except uv.UniverseError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 500
+
+    return jsonify({
+        "tickers": current["tickers"],
+        "locked": list(uv.UNIVERSE_LOCKED_TICKERS),
+        "source": current["source"],
+        "fallback_reason": current["fallback_reason"],
+        "max_size": uv.UNIVERSE_MAX_TICKERS,
+    })
+
+
+@api_bp.route("/universe/validate", methods=["POST"])
+def universe_validate():
+    """
+    Validates ONE candidate ticker before the UI adds it to the table.
+    Body: {"ticker": "NVDA"}.
+    200 -> {"ticker", "ok", "checks": [{"name", "ok", "detail"}, ...]}
+           (ok=false still returns 200: the checks ran and some failed)
+    400 -> ticker syntax invalid
+    503 -> Alpaca not configured/reachable (checks could not run)
+    """
+    body = request.get_json(silent=True) or {}
+    ticker = uv.normalize_ticker(body.get("ticker"))
+    if not uv.is_valid_ticker_syntax(ticker):
+        return jsonify({
+            "status": "error",
+            "message": "Not a valid ticker symbol (1-5 letters, optional .X class suffix, e.g. BRK.B).",
+        }), 400
+
+    try:
+        result = uv.validate_candidate(ticker, logger=current_app.logger)
+    except uv.UniverseError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+    return jsonify(result)
+
+
+@api_bp.route("/universe", methods=["POST"])
+def universe_post():
+    """
+    Validates and saves the WHOLE universe in one atomic write ("Save &
+    apply"). Body: {"tickers": ["SPY", ...]}.
+
+    Steps, in order (each failure stops before anything is written):
+      400 -- structural rules (syntax, duplicates, size, AGG+SPY present);
+             errors are per ticker
+      200 -- {"status": "unchanged"} when identical to the current file
+             (no write, so no pointless restart)
+      429 -- cooldown: the file changed less than
+             UNIVERSE_APPLY_COOLDOWN_SECONDS ago (protects lean-trader's
+             StartLimitBurst=3 / StartLimitIntervalSec=600 from being
+             exhausted by repeated restarts)
+      409 -- a rebalance looks in progress (/tmp/force_rebalance pending, or
+             inside the window around the scheduled rebalance read from
+             DualMomentumV2.cs), or Alpaca reports open orders
+      503 -- any of those safety checks could not be completed (fail closed)
+      400 -- an ADDED ticker fails the Alpaca checks (per-ticker results)
+      200 -- {"status": "ok"}: written; lean-trader restarts via the .path unit
+    """
+    body = request.get_json(silent=True) or {}
+    tickers, errors = uv.validate_ticker_list(body.get("tickers"))
+    if errors:
+        return jsonify({"status": "error", "message": "The universe is not valid.", "errors": errors}), 400
+
+    universe_path = Path(current_app.config["UNIVERSE_CONFIG_PATH"])
+
+    # Non-blocking: a second concurrent save is told to retry rather than
+    # queued behind a request that may take several Alpaca round-trips.
+    if not _universe_write_lock.acquire(blocking=False):
+        return jsonify({"status": "error", "message": "Another universe save is in progress; try again."}), 409
+    try:
+        # --- Unchanged? ------------------------------------------------------
+        try:
+            current = uv.effective_universe(universe_path, current_app.config["UNIVERSE_SEED_PATH"])
+        except uv.UniverseError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 500
+        if current["source"] == "file" and current["tickers"] == tickers:
+            return jsonify({"status": "unchanged", "message": "No changes to save; lean-trader was not restarted."})
+
+        # --- Cooldown --------------------------------------------------------
+        cooldown = int(current_app.config["UNIVERSE_APPLY_COOLDOWN_SECONDS"])
+        try:
+            age = time.time() - universe_path.stat().st_mtime
+        except FileNotFoundError:
+            age = None
+        if age is not None and age < cooldown:
+            wait = int(cooldown - age) + 1
+            return jsonify({
+                "status": "error",
+                "message": (f"The universe was changed {int(age)} s ago. Wait {wait} s before saving again: "
+                            f"each save restarts lean-trader, and systemd stops restarting it after "
+                            f"3 starts in 10 minutes."),
+            }), 429
+
+        # --- Rebalance / open-order guard (fail closed) ---------------------
+        if Path(current_app.config["FORCE_REBALANCE_TRIGGER_PATH"]).exists():
+            return jsonify({
+                "status": "error",
+                "message": "A manual rebalance is pending (/tmp/force_rebalance exists). Try again after it has run.",
+            }), 409
+        try:
+            hour, minute = uv.read_rebalance_schedule(current_app.config["STRATEGY_SOURCE_PATH"])
+            now_et = uv.now_exchange_time()
+            first_day = uv.first_trading_day_of_month(now_et.date())
+            if uv.in_rebalance_window(now_et, first_day, hour, minute):
+                return jsonify({
+                    "status": "error",
+                    "message": (f"The monthly rebalance is scheduled today at {hour:02d}:{minute:02d} ET; saves are "
+                                f"blocked from {uv.REBALANCE_GUARD_MINUTES_BEFORE} min before to "
+                                f"{uv.REBALANCE_GUARD_MINUTES_AFTER} min after it so a restart cannot interrupt it."),
+                }), 409
+            open_orders = uv.count_open_orders()
+            if open_orders > 0:
+                return jsonify({
+                    "status": "error",
+                    "message": (f"Alpaca reports {open_orders} open order(s). A restart now could interrupt orders "
+                                f"in flight; try again once they have filled or expired."),
+                }), 409
+        except uv.UniverseError as exc:
+            return jsonify({
+                "status": "error",
+                "message": f"Could not confirm it is safe to restart lean-trader, so nothing was saved: {exc}",
+            }), 503
+
+        # --- Alpaca checks for tickers being ADDED ---------------------------
+        # Tickers already in the current list were validated when they were
+        # added (or came from the seed), so only new ones are re-checked.
+        added = [t for t in tickers if t not in set(current["tickers"])]
+        failures = []
+        try:
+            for ticker in added:
+                result = uv.validate_candidate(ticker, logger=current_app.logger)
+                if not result["ok"]:
+                    failures.append(result)
+        except uv.UniverseError as exc:
+            return jsonify({"status": "error", "message": f"Could not validate added tickers: {exc}"}), 503
+        if failures:
+            return jsonify({
+                "status": "error",
+                "message": "Some added tickers failed validation; nothing was saved.",
+                "errors": [
+                    {"ticker": f["ticker"],
+                     "message": "; ".join(c["detail"] for c in f["checks"] if not c["ok"])}
+                    for f in failures
+                ],
+            }), 400
+
+        # --- Write (this is what triggers the restart) -----------------------
+        try:
+            uv.write_universe_atomic(universe_path, tickers)
+        except OSError as exc:
+            return jsonify({"status": "error", "message": f"Failed to write universe file: {exc}"}), 500
+
+        removed = [t for t in current["tickers"] if t not in set(tickers)]
+        current_app.logger.info(
+            "Universe saved: %d tickers (added %s, removed %s); universe-apply.path will restart lean-trader",
+            len(tickers), added or "none", removed or "none",
+        )
+        return jsonify({
+            "status": "ok",
+            "tickers": tickers,
+            "added": added,
+            "removed": removed,
+            "message": ("Saved. lean-trader is restarting to apply the new universe (if it was running). "
+                        "Removed tickers that are held will be sold at the next scheduled rebalance."),
+        })
+    finally:
+        _universe_write_lock.release()

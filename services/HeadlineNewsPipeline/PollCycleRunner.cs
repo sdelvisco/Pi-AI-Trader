@@ -55,8 +55,10 @@ namespace PiAiTrader.HeadlineNewsPipeline
         private readonly HighWaterMarkStore _stateStore;
         private readonly SignalWriter _signalWriter;
         private readonly IPacer _pacer;
-        private readonly IReadOnlyCollection<string> _universeTickers;
-        private readonly HashSet<string> _universeTickerSet;
+        // The trading universe. Re-read from universe.json at the start of
+        // every RunOnceAsync() (see TickerUniverse.Refresh), so a portal edit
+        // reaches this pipeline on its next poll cycle.
+        private readonly TickerUniverse _universe;
 
         public PollCycleRunner(
             IAlpacaNewsSource newsSource,
@@ -64,7 +66,8 @@ namespace PiAiTrader.HeadlineNewsPipeline
             HighWaterMarkStore stateStore,
             SignalWriter signalWriter,
             IPacer pacer,
-            IReadOnlyCollection<string> universeTickers = null)
+            IReadOnlyCollection<string> universeTickers = null,
+            TickerUniverse universe = null)
         {
             _newsSource = newsSource ?? throw new ArgumentNullException(nameof(newsSource));
             _intelligenceModule = intelligenceModule ?? throw new ArgumentNullException(nameof(intelligenceModule));
@@ -72,16 +75,34 @@ namespace PiAiTrader.HeadlineNewsPipeline
             _signalWriter = signalWriter ?? throw new ArgumentNullException(nameof(signalWriter));
             _pacer = pacer ?? throw new ArgumentNullException(nameof(pacer));
 
-            // Defaults to the real trading universe; tests inject a small
-            // fixed set instead so cases can be written against a handful
-            // of symbols rather than the full ~44-ticker universe.
-            _universeTickers = universeTickers ?? TickerUniverse.Tickers;
-            _universeTickerSet = new HashSet<string>(_universeTickers, StringComparer.Ordinal);
+            // Precedence:
+            //   1. universeTickers -- a fixed list (existing tests inject a
+            //      handful of symbols this way); never reads a file.
+            //   2. universe -- a TickerUniverse supplied by the caller
+            //      (Program.cs passes a file-backed one under its state dir;
+            //      the universe tests pass one over a temp file).
+            //   3. neither -- a file-backed TickerUniverse at the shared
+            //      default path, UniverseConfigReader.DefaultFilePath.
+            if (universeTickers != null && universe != null)
+            {
+                throw new ArgumentException("Pass universeTickers or universe, not both.");
+            }
+            _universe = universeTickers != null
+                ? TickerUniverse.Fixed(universeTickers)
+                : universe ?? new TickerUniverse(UniverseConfigReader.DefaultFilePath);
         }
 
         /// <summary>Runs exactly one poll-fetch-score-write cycle.</summary>
         public async Task RunOnceAsync(CancellationToken cancellationToken)
         {
+            // Re-read the universe FIRST, once per cycle, and take local
+            // copies so the news request and the per-headline filter below
+            // use the same list even if the file changes mid-cycle. Never
+            // throws: a missing/invalid file falls back to the built-in list.
+            _universe.Refresh();
+            var universeTickers = _universe.Tickers;
+            var universeTickerSet = _universe.TickerSet;
+
             var state = _stateStore.Load();
 
             DateTime sinceUtc;
@@ -101,7 +122,7 @@ namespace PiAiTrader.HeadlineNewsPipeline
                 lastProcessedId = state.LastProcessedId;
             }
 
-            var articles = await _newsSource.GetNewsSinceAsync(_universeTickers, sinceUtc, cancellationToken)
+            var articles = await _newsSource.GetNewsSinceAsync(universeTickers, sinceUtc, cancellationToken)
                 .ConfigureAwait(false);
 
             // Alpaca's own sort=ASC ordering is requested but not
@@ -122,7 +143,7 @@ namespace PiAiTrader.HeadlineNewsPipeline
             foreach (var article in newArticles)
             {
                 var matchedSymbols = (article.Symbols ?? Array.Empty<string>())
-                    .Where(s => _universeTickerSet.Contains(s))
+                    .Where(s => universeTickerSet.Contains(s))
                     .Distinct(StringComparer.Ordinal)
                     .ToList();
 
